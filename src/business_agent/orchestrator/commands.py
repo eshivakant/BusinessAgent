@@ -27,6 +27,15 @@ class DataCommand:
     limit: int
 
 
+@dataclass(frozen=True)
+class ListCommand:
+    document_type: str | None = None
+    vendor: str | None = None
+    date_from: date | None = None
+    date_to: date | None = None
+    limit: int = 100
+
+
 def parse_ask_command(raw_text: str) -> AskCommand:
     text = raw_text.strip()
     if text.startswith("/ask"):
@@ -136,3 +145,55 @@ def _coerce_filter_value(raw_value: str) -> str | int | float | bool:
     if re.fullmatch(r"-?\d+\.\d+", raw_value):
         return float(raw_value)
     return raw_value
+
+
+def parse_list_command(raw_text: str) -> ListCommand:
+    """Parse /list command for document filtering.
+    
+    Example: /list type=invoice vendor=acme date_from=2025-01-01 date_to=2025-12-31 limit=50
+    Also accepts: list type=invoice ... (without slash)
+    """
+    text = raw_text.strip()
+    if text.startswith("/list"):
+        text = text[5:].strip()
+    elif text.startswith("list"):
+        text = text[4:].strip()
+    
+    tokens = shlex.split(text)
+    document_type = None
+    vendor = None
+    date_from = None
+    date_to = None
+    limit = 100
+    
+    for token in tokens:
+        if "=" not in token:
+            raise ValueError(f"Expected key=value pair, got: {token}")
+        key, value = token.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        
+        if key == "type":
+            document_type = value
+        elif key == "vendor":
+            vendor = value
+        elif key == "date_from":
+            date_from = date.fromisoformat(value)
+        elif key == "date_to":
+            date_to = date.fromisoformat(value)
+        elif key == "limit":
+            limit = int(value)
+        else:
+            raise ValueError(f"Unsupported list option: {key}")
+    
+    if date_from and date_to and date_from > date_to:
+        raise ValueError("date_from must be before or equal to date_to")
+    
+    return ListCommand(
+        document_type=document_type,
+        vendor=vendor,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
+

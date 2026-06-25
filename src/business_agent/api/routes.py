@@ -290,3 +290,146 @@ async def _send_or_edit(chat_id: int, message_id: Any, text: str, reply_markup: 
         )
         return
     await get_telegram_client().send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+
+
+# Document API endpoints
+
+
+class DocumentListResponse(BaseModel):
+    """Response for document list query."""
+    count: int
+    documents: list[dict[str, Any]]
+
+
+class DocumentInfoResponse(BaseModel):
+    """Response for single document info."""
+    document_id: str
+    title: str
+    document_type: str
+    vendor: str | None
+    department: str | None
+    keywords: list[str]
+    summary: str
+    chunk_count: int
+    ingested_at: str
+    event_date: str | None
+    archive_link: str | None
+
+
+@router.get("/api/documents/list", response_model=DocumentListResponse)
+def list_documents(
+    document_type: str | None = None,
+    vendor: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 100,
+    _: None = Depends(verify_internal_api_token),
+) -> DocumentListResponse:
+    """List documents with optional filters."""
+    from business_agent.dependencies import get_document_registry
+    from datetime import datetime
+    
+    registry = get_document_registry()
+    if registry is None:
+        return DocumentListResponse(count=0, documents=[])
+    
+    # Parse date filters
+    from_date = datetime.fromisoformat(date_from) if date_from else None
+    to_date = datetime.fromisoformat(date_to) if date_to else None
+    
+    # Query registry
+    docs = registry.query(
+        document_type=document_type,
+        vendor=vendor,
+        date_from=from_date,
+        date_to=to_date,
+        limit=limit,
+    )
+    
+    settings = get_settings()
+    documents = []
+    for doc in docs:
+        archive_link = None
+        if doc.archived_file_path and settings.app_base_url:
+            archive_link = f"{settings.app_base_url}/api/documents/{doc.document_id}/download"
+        
+        documents.append({
+            "document_id": doc.document_id,
+            "title": doc.title,
+            "document_type": doc.document_type,
+            "vendor": doc.vendor,
+            "department": doc.department,
+            "keywords": doc.keywords,
+            "ingested_at": doc.ingested_at.isoformat(),
+            "event_date": doc.event_date.isoformat() if doc.event_date else None,
+            "archive_link": archive_link,
+        })
+    
+    return DocumentListResponse(count=len(documents), documents=documents)
+
+
+@router.get("/api/documents/{document_id}", response_model=DocumentInfoResponse)
+def get_document(
+    document_id: str,
+    _: None = Depends(verify_internal_api_token),
+) -> DocumentInfoResponse:
+    """Get document metadata and summary."""
+    
+    from business_agent.dependencies import get_document_registry
+    
+    registry = get_document_registry()
+    if registry is None:
+        raise HTTPException(status_code=404, detail="Document registry not available")
+    
+    doc = registry.get(document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    settings = get_settings()
+    archive_link = None
+    if doc.archived_file_path and settings.app_base_url:
+        archive_link = f"{settings.app_base_url}/api/documents/{document_id}/download"
+    
+    return DocumentInfoResponse(
+        document_id=doc.document_id,
+        title=doc.title,
+        document_type=doc.document_type,
+        vendor=doc.vendor,
+        department=doc.department,
+        keywords=doc.keywords,
+        summary=doc.summary,
+        chunk_count=doc.chunk_count,
+        ingested_at=doc.ingested_at.isoformat(),
+        event_date=doc.event_date.isoformat() if doc.event_date else None,
+        archive_link=archive_link,
+    )
+
+
+@router.get("/api/documents/{document_id}/download")
+def download_document(
+    document_id: str,
+    _: None = Depends(verify_internal_api_token),
+):
+    """Download original archived document."""
+    from business_agent.dependencies import get_document_registry
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    
+    registry = get_document_registry()
+    if registry is None:
+        raise HTTPException(status_code=404, detail="Document registry not available")
+    
+    doc = registry.get(document_id)
+    if doc is None or doc.archived_file_path is None:
+        raise HTTPException(status_code=404, detail="Document or archive not found")
+    
+    file_path = Path(doc.archived_file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Archive file not found on disk")
+    
+    return FileResponse(
+        path=file_path,
+        filename=f"{document_id}.{doc.source_type}",
+        media_type="application/octet-stream",
+    )
+

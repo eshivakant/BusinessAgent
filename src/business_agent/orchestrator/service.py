@@ -11,9 +11,11 @@ from business_agent.memory.models import MemoryMatch, MemoryQueryInput
 from business_agent.memory.store import MemoryStore
 from business_agent.orchestrator.commands import (
     AskCommand,
+    ListCommand,
     parse_ask_command,
     parse_data_command,
     parse_ingest_command,
+    parse_list_command,
     parse_question_with_optional_dates,
 )
 from business_agent.orchestrator.conversation import ConversationStore
@@ -24,6 +26,7 @@ HELP_TEXT = (
     "Commands:\n"
     "/ask [from=YYYY-MM-DD] [to=YYYY-MM-DD] <question>\n"
     "/ingest <source_uri> [event_date=YYYY-MM-DD]\n"
+    "/list [type=<type>] [vendor=<vendor>] [date_from=YYYY-MM-DD] [date_to=YYYY-MM-DD] [limit=<n>]\n"
     "/data table=<name> columns=<c1,c2> filters=<key:value,...> limit=<n>\n"
     "/reset\n\n"
     "Tip: keep questions concise. Use date filters for precise retrieval."
@@ -66,6 +69,8 @@ class BusinessOrchestrator:
             return self._handle_reset_command(chat_id)
         if text.startswith("/help"):
             return TelegramReply(text=HELP_TEXT)
+        if text.startswith("/list"):
+            return self._handle_list_command(text)
         if text.startswith("/ingest"):
             return self._handle_ingest_command(text)
         if text.startswith("/data"):
@@ -168,6 +173,58 @@ class BusinessOrchestrator:
                 f"event_date: {command.event_date.isoformat() if command.event_date else 'none'}"
             )
         )
+
+    def _handle_list_command(self, text: str) -> TelegramReply:
+        """Handle /list command to query document registry."""
+        try:
+            command = parse_list_command(text)
+        except ValueError as exc:
+            return TelegramReply(
+                text=(
+                    f"Could not parse list command: {exc}\n"
+                    "Try: /list type=invoice vendor=acme date_from=2025-01-01 limit=10"
+                )
+            )
+        
+        from business_agent.dependencies import get_document_registry
+        registry = get_document_registry()
+        if registry is None:
+            return TelegramReply(text="Document registry is not configured.")
+        
+        # Query registry
+        from datetime import datetime, timezone
+        date_from = None
+        date_to = None
+        if command.date_from:
+            date_from = datetime.combine(command.date_from, datetime.min.time(), tzinfo=timezone.utc)
+        if command.date_to:
+            date_to = datetime.combine(command.date_to, datetime.max.time(), tzinfo=timezone.utc)
+        
+        docs = registry.query(
+            document_type=command.document_type,
+            vendor=command.vendor,
+            date_from=date_from,
+            date_to=date_to,
+            limit=command.limit,
+        )
+        
+        if not docs:
+            return TelegramReply(text="No documents found matching your query.")
+        
+        # Format document list
+        lines = [f"Found {len(docs)} document(s):"]
+        for doc in docs:
+            lines.append(
+                f"• {doc.title} ({doc.document_type}, {doc.ingested_at.strftime('%Y-%m-%d')})"
+            )
+            if doc.vendor:
+                lines.append(f"  Vendor: {doc.vendor}")
+            if doc.summary:
+                short_summary = (doc.summary[:80] + "...") if len(doc.summary) > 80 else doc.summary
+                lines.append(f"  Summary: {short_summary}")
+        
+        text = "\n".join(lines)
+        return TelegramReply(text=text, show_actions=False)
 
     def _handle_data_command(self, text: str) -> TelegramReply:
         if self._sql_reader is None:

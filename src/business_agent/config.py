@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     ingestion_summary_sentences: int = 5
     ingestion_max_document_chars: int = 200000
     ingestion_enable_metadata_extraction: bool = True
+    
+    app_base_url: str | None = None
 
     llm_openrouter_api_key: str | None = None
     llm_openrouter_base_url: str = "https://openrouter.ai/api/v1"

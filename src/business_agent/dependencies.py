@@ -71,6 +71,9 @@ def get_ingestion_service() -> DocumentIngestionService:
         allowed_local_dir=settings.ingestion_allowed_local_dir,
         archive_dir=settings.ingestion_archive_dir,
         archive_enabled=settings.ingestion_archive_enabled,
+        llm_client=get_llm_client(),
+        document_registry=get_document_registry(),
+        enable_metadata_extraction=settings.ingestion_enable_metadata_extraction,
     )
 
 
