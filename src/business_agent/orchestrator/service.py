@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from textwrap import shorten
+from typing import Any
 
 from business_agent.config import get_settings
 from business_agent.data.readonly_sql import ReadOnlySQLDataAccess, SQLReadRequest
@@ -25,6 +26,8 @@ from business_agent.orchestrator.commands import (
     parse_question_with_optional_dates,
 )
 from business_agent.orchestrator.conversation import ConversationStore
+from business_agent.orchestrator.conversation_state import ConversationFlow, ConversationManager
+from business_agent.orchestrator.nl_query import QueryIntent, ParsedNLQuery, parse_natural_language_query
 from business_agent.property.registry import PropertyRegistry
 from business_agent.worker.contracts import DocumentIngestionTask, SubagentTaskQueue
 
@@ -36,10 +39,21 @@ HELP_TEXT = (
     "/list [type=<type>] [vendor=<vendor>] [date_from=YYYY-MM-DD] [date_to=YYYY-MM-DD] [limit=<n>]\n"
     "/property list [status=<status>]\n"
     "/property show <property_id>\n"
+    "/property add\n"
+    "/mortgage add <property_id>\n"
     "/mortgage expiring [months=<n>]\n"
     "/data table=<name> columns=<c1,c2> filters=<key:value,...> limit=<n>\n"
     "/reset\n\n"
-    "Tip: keep questions concise. Use date filters for precise retrieval."
+    "📝 You can also send documents (PDF, DOCX, TXT) or photos for automatic ingestion.\n"
+    "🎙️ Send voice notes - they'll be transcribed and memorized.\n"
+    "💬 Send text messages - they'll be memorized for future reference.\n\n"
+    "Natural language queries you can ask:\n"
+    "• 'compare mortgage offers for 133 Bowland Drive within last 2 months'\n"
+    "• 'When is the EPC certificate expiring for 133 Bowland Drive'\n"
+    "• 'Show me mortgage statements for 133 Bowland Drive for past 2 years'\n"
+    "• 'Does the tenancy agreement for 133 Bowland Drive has no pet clause?'\n"
+    "• 'Give me links for all completion statements within last year'\n"
+    "• 'I see a transaction of £180 on 12 June 2026, do we have a corresponding invoice?'\n"
 )
 
 
@@ -62,6 +76,8 @@ class BusinessOrchestrator:
         sql_reader: ReadOnlySQLDataAccess | None = None,
         document_registry: DocumentRegistry | None = None,
         property_registry: PropertyRegistry | None = None,
+        llm_client: Any | None = None,
+        text_memorization_service: Any | None = None,
     ) -> None:
         self._memory_store = memory_store
         self._task_queue = task_queue
@@ -70,7 +86,10 @@ class BusinessOrchestrator:
         self._sql_reader = sql_reader
         self._document_registry = document_registry
         self._property_registry = property_registry
+        self._llm_client = llm_client
+        self._text_memorization_service = text_memorization_service
         self._settings = get_settings()
+        self._conversation_manager = ConversationManager()
 
     def handle_telegram_message(self, chat_id: int, message_text: str) -> str:
         return self.handle_telegram_message_with_ui(chat_id=chat_id, message_text=message_text).text
@@ -79,6 +98,25 @@ class BusinessOrchestrator:
         text = message_text.strip()
         if not text:
             return TelegramReply(text="Send /help for available actions.")
+        
+        # Check for active conversation first
+        user_id = str(chat_id)
+        active_conv = self._conversation_manager.get_conversation(user_id)
+        if active_conv:
+            # Handle cancel command
+            if text.lower() in ["/cancel", "cancel", "quit", "exit"]:
+                self._conversation_manager.end_conversation(user_id)
+                return TelegramReply(text="Conversation cancelled.")
+            
+            # Route to appropriate conversation handler
+            if active_conv.flow == ConversationFlow.PROPERTY_ADD:
+                return self._handle_property_add_conversation(user_id, text, active_conv)
+            elif active_conv.flow == ConversationFlow.MORTGAGE_ADD:
+                return self._handle_mortgage_add_conversation(user_id, text, active_conv)
+            elif active_conv.flow == ConversationFlow.TENANT_ADD:
+                return self._handle_tenant_add_conversation(user_id, text, active_conv)
+        
+        # Handle commands normally
         if text.startswith("/reset"):
             return self._handle_reset_command(chat_id)
         if text.startswith("/help"):
@@ -86,9 +124,9 @@ class BusinessOrchestrator:
         if text.startswith("/list"):
             return self._handle_list_command(text)
         if text.startswith("/property"):
-            return self._handle_property_command(text)
+            return self._handle_property_command(chat_id, text)
         if text.startswith("/mortgage"):
-            return self._handle_mortgage_command(text)
+            return self._handle_mortgage_command(chat_id, text)
         if text.startswith("/ingest"):
             return self._handle_ingest_command(text)
         if text.startswith("/data"):
@@ -152,21 +190,38 @@ class BusinessOrchestrator:
         return response
 
     def _handle_freeform_question(self, chat_id: int, text: str) -> TelegramReply:
-        try:
-            command = parse_question_with_optional_dates(text)
-        except ValueError:
-            command = AskCommand(question=text)
+        """Handle freeform text by parsing NL intent first, falling back to memory search."""
+        parsed = parse_natural_language_query(text)
+        
+        if parsed.intent == QueryIntent.COMPARE_MORTGAGES:
+            return self._handle_compare_mortgages(parsed)
+        elif parsed.intent == QueryIntent.EPC_EXPIRY:
+            return self._handle_epc_expiry(parsed)
+        elif parsed.intent == QueryIntent.MORTGAGE_STATEMENTS:
+            return self._handle_mortgage_statements(parsed)
+        elif parsed.intent == QueryIntent.TENANCY_CLAUSE_CHECK:
+            return self._handle_tenancy_clause_check(parsed)
+        elif parsed.intent == QueryIntent.BULK_DOCUMENT_LINKS:
+            return self._handle_bulk_document_links(parsed)
+        elif parsed.intent == QueryIntent.TRANSACTION_MATCHING:
+            return self._handle_transaction_matching(parsed)
+        else:
+            # Fall back to standard memory-based answer
+            try:
+                command = parse_question_with_optional_dates(text)
+            except ValueError:
+                command = AskCommand(question=text)
 
-        query_text = self._build_query_text(chat_id=chat_id, question=command.question)
-        request = MemoryQueryInput(
-            query=query_text,
-            date_from=command.date_from,
-            date_to=command.date_to,
-            top_k=5,
-        )
-        response = self._answer_with_memory(request=request, question_text=command.question)
-        self._record_assistant_turn(chat_id=chat_id, response=response.text)
-        return response
+            query_text = self._build_query_text(chat_id=chat_id, question=command.question)
+            request = MemoryQueryInput(
+                query=query_text,
+                date_from=command.date_from or parsed.date_from,
+                date_to=command.date_to or parsed.date_to,
+                top_k=5,
+            )
+            response = self._answer_with_memory(request=request, question_text=command.question)
+            self._record_assistant_turn(chat_id=chat_id, response=response.text)
+            return response
 
     def _handle_ingest_command(self, text: str) -> TelegramReply:
         try:
@@ -244,7 +299,7 @@ class BusinessOrchestrator:
         text = "\n".join(lines)
         return TelegramReply(text=text, show_actions=False)
 
-    def _handle_property_command(self, text: str) -> TelegramReply:
+    def _handle_property_command(self, chat_id: int, text: str) -> TelegramReply:
         """Handle /property commands."""
         if self._property_registry is None:
             return TelegramReply(text="Property registry is not configured.")
@@ -261,8 +316,14 @@ class BusinessOrchestrator:
         
         # Handle "add" flow (interactive)
         if command == "add":
+            user_id = str(chat_id)
+            self._conversation_manager.start_conversation(
+                user_id=user_id,
+                flow=ConversationFlow.PROPERTY_ADD,
+                initial_step="address"
+            )
             return TelegramReply(
-                text="Interactive property add flow not yet implemented. Use API: POST /api/properties"
+                text="Let's add a new property. Please provide the property address.\n\n(Send /cancel to abort)"
             )
         
         # Handle list command
@@ -335,7 +396,7 @@ class BusinessOrchestrator:
         
         return TelegramReply(text="Unknown property command.")
 
-    def _handle_mortgage_command(self, text: str) -> TelegramReply:
+    def _handle_mortgage_command(self, chat_id: int, text: str) -> TelegramReply:
         """Handle /mortgage commands."""
         if self._property_registry is None:
             return TelegramReply(text="Property registry is not configured.")
@@ -353,8 +414,15 @@ class BusinessOrchestrator:
         # Handle "add" flow (interactive)
         if isinstance(command, str) and command.startswith("add:"):
             property_id = command.split(":", 1)[1]
+            user_id = str(chat_id)
+            self._conversation_manager.start_conversation(
+                user_id=user_id,
+                flow=ConversationFlow.MORTGAGE_ADD,
+                initial_step="lender",
+                initial_data={"property_id": property_id}
+            )
             return TelegramReply(
-                text=f"Interactive mortgage add flow for property {property_id} not yet implemented. Use API: POST /api/mortgages"
+                text=f"Let's add a mortgage for property {property_id}. Please provide the lender name.\n\n(Send /cancel to abort)"
             )
         
         # Handle expiring command
@@ -500,3 +568,611 @@ class BusinessOrchestrator:
             return TelegramReply(text="Conversation memory is disabled.")
         self._conversation_store.clear(chat_id=chat_id)
         return TelegramReply(text="Conversation context cleared.")
+    
+    def _handle_property_add_conversation(
+        self, user_id: str, text: str, conv: Any
+    ) -> TelegramReply:
+        """Handle multi-turn property add conversation."""
+        from business_agent.property.models import Property, PropertyStatus
+        from decimal import Decimal, InvalidOperation
+        import uuid
+        
+        # Step: address
+        if conv.step == "address":
+            conv.set_data("address", text)
+            conv.update_step("postcode")
+            return TelegramReply(text="Great! What's the postcode? (or send 'skip')")
+        
+        # Step: postcode
+        if conv.step == "postcode":
+            if text.lower() != "skip":
+                conv.set_data("postcode", text)
+            conv.update_step("bedrooms")
+            return TelegramReply(text="How many bedrooms? (or send 'skip')")
+        
+        # Step: bedrooms
+        if conv.step == "bedrooms":
+            if text.lower() != "skip":
+                try:
+                    bedrooms = int(text)
+                    if bedrooms < 0:
+                        return TelegramReply(text="Bedrooms must be positive. Please try again:")
+                    conv.set_data("bedrooms", bedrooms)
+                except ValueError:
+                    return TelegramReply(text="Please enter a valid number for bedrooms:")
+            conv.update_step("bathrooms")
+            return TelegramReply(text="How many bathrooms? (or send 'skip')")
+        
+        # Step: bathrooms
+        if conv.step == "bathrooms":
+            if text.lower() != "skip":
+                try:
+                    bathrooms = int(text)
+                    if bathrooms < 0:
+                        return TelegramReply(text="Bathrooms must be positive. Please try again:")
+                    conv.set_data("bathrooms", bathrooms)
+                except ValueError:
+                    return TelegramReply(text="Please enter a valid number for bathrooms:")
+            conv.update_step("square_feet")
+            return TelegramReply(text="Square feet? (or send 'skip')")
+        
+        # Step: square_feet
+        if conv.step == "square_feet":
+            if text.lower() != "skip":
+                try:
+                    square_feet = int(text)
+                    if square_feet < 0:
+                        return TelegramReply(text="Square feet must be positive. Please try again:")
+                    conv.set_data("square_feet", square_feet)
+                except ValueError:
+                    return TelegramReply(text="Please enter a valid number for square feet:")
+            conv.update_step("purchase_date")
+            return TelegramReply(text="Purchase date (YYYY-MM-DD)? (or send 'skip')")
+        
+        # Step: purchase_date
+        if conv.step == "purchase_date":
+            if text.lower() != "skip":
+                try:
+                    from datetime import date
+                    parts = text.split("-")
+                    if len(parts) != 3:
+                        return TelegramReply(text="Please use format YYYY-MM-DD:")
+                    purchase_date = date(int(parts[0]), int(parts[1]), int(parts[2]))
+                    conv.set_data("purchase_date", purchase_date.isoformat())
+                except (ValueError, IndexError):
+                    return TelegramReply(text="Invalid date format. Please use YYYY-MM-DD:")
+            conv.update_step("purchase_price")
+            return TelegramReply(text="Purchase price (£)? (or send 'skip')")
+        
+        # Step: purchase_price
+        if conv.step == "purchase_price":
+            if text.lower() != "skip":
+                try:
+                    # Remove currency symbols and commas
+                    clean_text = text.replace("£", "").replace(",", "").strip()
+                    purchase_price = Decimal(clean_text)
+                    if purchase_price < 0:
+                        return TelegramReply(text="Price must be positive. Please try again:")
+                    conv.set_data("purchase_price", float(purchase_price))
+                except (ValueError, InvalidOperation):
+                    return TelegramReply(text="Please enter a valid price (numbers only):")
+            conv.update_step("current_value")
+            return TelegramReply(text="Current value (£)? (or send 'skip')")
+        
+        # Step: current_value
+        if conv.step == "current_value":
+            if text.lower() != "skip":
+                try:
+                    clean_text = text.replace("£", "").replace(",", "").strip()
+                    current_value = Decimal(clean_text)
+                    if current_value < 0:
+                        return TelegramReply(text="Value must be positive. Please try again:")
+                    conv.set_data("current_value", float(current_value))
+                except (ValueError, InvalidOperation):
+                    return TelegramReply(text="Please enter a valid value (numbers only):")
+            conv.update_step("status")
+            return TelegramReply(text="Property status? (owned / viewing / under_offer)")
+        
+        # Step: status
+        if conv.step == "status":
+            try:
+                status = PropertyStatus(text.lower())
+                conv.set_data("status", status.value)
+            except ValueError:
+                return TelegramReply(text="Invalid status. Please choose: owned, viewing, or under_offer")
+            conv.update_step("notes")
+            return TelegramReply(text="Any notes? (or send 'skip')")
+        
+        # Step: notes
+        if conv.step == "notes":
+            if text.lower() != "skip":
+                conv.set_data("notes", text)
+            conv.update_step("confirm")
+            
+            # Build confirmation message
+            lines = ["Please confirm the property details:"]
+            lines.append(f"Address: {conv.get_data('address')}")
+            if conv.get_data("postcode"):
+                lines.append(f"Postcode: {conv.get_data('postcode')}")
+            if conv.get_data("bedrooms") is not None:
+                lines.append(f"Bedrooms: {conv.get_data('bedrooms')}")
+            if conv.get_data("bathrooms") is not None:
+                lines.append(f"Bathrooms: {conv.get_data('bathrooms')}")
+            if conv.get_data("square_feet") is not None:
+                lines.append(f"Square feet: {conv.get_data('square_feet')}")
+            if conv.get_data("purchase_date"):
+                lines.append(f"Purchase date: {conv.get_data('purchase_date')}")
+            if conv.get_data("purchase_price") is not None:
+                lines.append(f"Purchase price: £{conv.get_data('purchase_price'):,.0f}")
+            if conv.get_data("current_value") is not None:
+                lines.append(f"Current value: £{conv.get_data('current_value'):,.0f}")
+            lines.append(f"Status: {conv.get_data('status')}")
+            if conv.get_data("notes"):
+                lines.append(f"Notes: {conv.get_data('notes')}")
+            lines.append("\nSend 'yes' to save or 'no' to cancel.")
+            
+            return TelegramReply(text="\n".join(lines))
+        
+        # Step: confirm
+        if conv.step == "confirm":
+            if text.lower() in ["yes", "y", "confirm"]:
+                # Create property
+                property_id = f"prop-{uuid.uuid4().hex[:8]}"
+                prop = Property(
+                    id=property_id,
+                    address=conv.get_data("address"),
+                    postcode=conv.get_data("postcode"),
+                    bedrooms=conv.get_data("bedrooms"),
+                    bathrooms=conv.get_data("bathrooms"),
+                    square_feet=conv.get_data("square_feet"),
+                    purchase_date=conv.get_data("purchase_date"),
+                    purchase_price=Decimal(str(conv.get_data("purchase_price"))) if conv.get_data("purchase_price") is not None else None,
+                    current_value=Decimal(str(conv.get_data("current_value"))) if conv.get_data("current_value") is not None else None,
+                    status=PropertyStatus(conv.get_data("status")),
+                    notes=conv.get_data("notes"),
+                )
+                
+                if self._property_registry:
+                    self._property_registry.add_property(prop)
+                
+                self._conversation_manager.end_conversation(user_id)
+                return TelegramReply(text=f"✅ Property added successfully! ID: {property_id}")
+            else:
+                self._conversation_manager.end_conversation(user_id)
+                return TelegramReply(text="Property registration cancelled.")
+        
+        return TelegramReply(text="Unknown conversation step. Please start over with /property add")
+    
+    def _handle_mortgage_add_conversation(
+        self, user_id: str, text: str, conv: Any
+    ) -> TelegramReply:
+        """Handle multi-turn mortgage add conversation."""
+        from business_agent.property.models import Mortgage
+        from decimal import Decimal, InvalidOperation
+        from datetime import date as Date
+        import uuid
+        
+        # Step: lender
+        if conv.step == "lender":
+            conv.set_data("lender", text)
+            conv.update_step("principal")
+            return TelegramReply(text="What's the mortgage principal/loan amount (£)?")
+        
+        # Step: principal
+        if conv.step == "principal":
+            try:
+                clean_text = text.replace("£", "").replace(",", "").strip()
+                principal = Decimal(clean_text)
+                if principal <= 0:
+                    return TelegramReply(text="Principal must be positive. Please try again:")
+                conv.set_data("principal", float(principal))
+            except (ValueError, InvalidOperation):
+                return TelegramReply(text="Please enter a valid amount (e.g. 200000):")
+            conv.update_step("interest_rate")
+            return TelegramReply(text="What's the annual interest rate (e.g. 3.5)?")
+        
+        # Step: interest_rate
+        if conv.step == "interest_rate":
+            try:
+                clean_text = text.replace("%", "").strip()
+                interest_rate = Decimal(clean_text)
+                if interest_rate < 0 or interest_rate > 100:
+                    return TelegramReply(text="Rate must be between 0 and 100. Please try again:")
+                conv.set_data("interest_rate", float(interest_rate))
+            except (ValueError, InvalidOperation):
+                return TelegramReply(text="Please enter a valid rate (e.g. 3.5):")
+            conv.update_step("term_months")
+            return TelegramReply(text="Mortgage term in months (e.g. 300 for 25 years)?")
+        
+        # Step: term_months
+        if conv.step == "term_months":
+            try:
+                term_months = int(text)
+                if term_months <= 0:
+                    return TelegramReply(text="Term must be positive. Please try again:")
+                conv.set_data("term_months", term_months)
+            except ValueError:
+                return TelegramReply(text="Please enter a valid number of months:")
+            conv.update_step("monthly_payment")
+            return TelegramReply(text="Monthly payment amount (£)?")
+        
+        # Step: monthly_payment
+        if conv.step == "monthly_payment":
+            try:
+                clean_text = text.replace("£", "").replace(",", "").strip()
+                monthly_payment = Decimal(clean_text)
+                if monthly_payment < 0:
+                    return TelegramReply(text="Payment must be positive. Please try again:")
+                conv.set_data("monthly_payment", float(monthly_payment))
+            except (ValueError, InvalidOperation):
+                return TelegramReply(text="Please enter a valid payment amount:")
+            conv.update_step("start_date")
+            return TelegramReply(text="Start date (YYYY-MM-DD)?")
+        
+        # Step: start_date
+        if conv.step == "start_date":
+            try:
+                parts = text.split("-")
+                if len(parts) != 3:
+                    return TelegramReply(text="Please use format YYYY-MM-DD:")
+                start_date = Date(int(parts[0]), int(parts[1]), int(parts[2]))
+                conv.set_data("start_date", start_date)
+            except (ValueError, IndexError):
+                return TelegramReply(text="Invalid date format. Please use YYYY-MM-DD:")
+            conv.update_step("product_type")
+            return TelegramReply(text="Product type (e.g. 'Fixed 2 year')? (or send 'skip')")
+        
+        # Step: product_type
+        if conv.step == "product_type":
+            if text.lower() != "skip":
+                conv.set_data("product_type", text)
+            conv.update_step("notes")
+            return TelegramReply(text="Any notes? (or send 'skip')")
+        
+        # Step: notes
+        if conv.step == "notes":
+            if text.lower() != "skip":
+                conv.set_data("notes", text)
+            conv.update_step("confirm")
+            
+            # Calculate end_date from start_date and term_months
+            start = conv.get_data("start_date")
+            term = conv.get_data("term_months")
+            end_date = Date(
+                start.year + (start.month + term - 1) // 12,
+                (start.month + term - 1) % 12 + 1,
+                start.day
+            )
+            conv.set_data("end_date", end_date)
+            
+            # Build confirmation message
+            lines = ["Please confirm the mortgage details:"]
+            lines.append(f"Property ID: {conv.get_data('property_id')}")
+            lines.append(f"Lender: {conv.get_data('lender')}")
+            lines.append(f"Principal: £{conv.get_data('principal'):,.0f}")
+            lines.append(f"Interest rate: {conv.get_data('interest_rate')}%")
+            lines.append(f"Term: {conv.get_data('term_months')} months")
+            lines.append(f"Monthly payment: £{conv.get_data('monthly_payment'):,.0f}")
+            lines.append(f"Start date: {conv.get_data('start_date')}")
+            lines.append(f"End date: {end_date}")
+            if conv.get_data("product_type"):
+                lines.append(f"Product type: {conv.get_data('product_type')}")
+            if conv.get_data("notes"):
+                lines.append(f"Notes: {conv.get_data('notes')}")
+            lines.append("\nSend 'yes' to save or 'no' to cancel.")
+            
+            return TelegramReply(text="\n".join(lines))
+        
+        # Step: confirm
+        if conv.step == "confirm":
+            if text.lower() in ["yes", "y", "confirm"]:
+                # Create mortgage
+                mortgage_id = f"mort-{uuid.uuid4().hex[:8]}"
+                mortgage = Mortgage(
+                    id=mortgage_id,
+                    property_id=conv.get_data("property_id"),
+                    lender=conv.get_data("lender"),
+                    principal=Decimal(str(conv.get_data("principal"))),
+                    interest_rate=Decimal(str(conv.get_data("interest_rate"))),
+                    term_months=conv.get_data("term_months"),
+                    monthly_payment=Decimal(str(conv.get_data("monthly_payment"))),
+                    start_date=conv.get_data("start_date"),
+                    end_date=conv.get_data("end_date"),
+                    product_type=conv.get_data("product_type"),
+                    notes=conv.get_data("notes"),
+                )
+                
+                if self._property_registry:
+                    self._property_registry.add_mortgage(mortgage)
+                
+                self._conversation_manager.end_conversation(user_id)
+                return TelegramReply(text=f"✅ Mortgage added successfully! ID: {mortgage_id}")
+            else:
+                self._conversation_manager.end_conversation(user_id)
+                return TelegramReply(text="Mortgage registration cancelled.")
+        
+        return TelegramReply(text="Unknown conversation step. Please start over with /mortgage add")
+    
+    def _handle_tenant_add_conversation(
+        self, user_id: str, text: str, conv: Any
+    ) -> TelegramReply:
+        """Handle multi-turn tenant add conversation."""
+        # TODO: Implement tenant add flow
+        self._conversation_manager.end_conversation(user_id)
+        return TelegramReply(text="Tenant add flow not yet implemented.")
+
+    def memorize_text_message(self, chat_id: int, text: str) -> str | None:
+        """Store a plain text message in memory. Returns record ID or None."""
+        if self._text_memorization_service is None:
+            return None
+        return self._text_memorization_service.memorize_text(text=text, chat_id=chat_id)
+
+    def transcribe_and_store_voice(self, chat_id: int, audio_file_path: str, file_id: str | None = None) -> str | None:
+        """Transcribe a voice note and store it in memory. Returns transcription or None."""
+        if self._llm_client is None:
+            return None
+        try:
+            transcription = self._llm_client.transcribe_audio(audio_file_path)
+            if self._text_memorization_service:
+                self._text_memorization_service.memorize_voice_transcription(
+                    transcription=transcription,
+                    audio_file_id=file_id,
+                    chat_id=chat_id,
+                )
+            return transcription
+        except Exception:
+            return None
+
+    # --- NL Query Intent Handlers ---
+
+    def _handle_compare_mortgages(self, parsed: ParsedNLQuery) -> TelegramReply:
+        """Compare mortgage offers for a property within a date range."""
+        if not parsed.property_address:
+            return TelegramReply(
+                text="I couldn't identify a property address in your question. "
+                     "Please include the property address, e.g. 'compare mortgage offers for 133 Bowland Drive within last 2 months'"
+            )
+        
+        # Query document registry for mortgage offers
+        from datetime import datetime, timezone
+        date_from = None
+        date_to = None
+        if parsed.date_from:
+            date_from = datetime.combine(parsed.date_from, datetime.min.time(), tzinfo=timezone.utc)
+        if parsed.date_to:
+            date_to = datetime.combine(parsed.date_to, datetime.max.time(), tzinfo=timezone.utc)
+        
+        docs = []
+        if self._document_registry:
+            docs = self._document_registry.query(
+                document_type="mortgage_offer",
+                date_from=date_from,
+                date_to=date_to,
+                limit=20,
+            )
+            # Filter by property_address if set
+            if parsed.property_address:
+                docs = [d for d in docs if d.property_address and parsed.property_address.lower() in d.property_address.lower()]
+        
+        if not docs:
+            return TelegramReply(
+                text=f"No mortgage offers found for '{parsed.property_address}'"
+                     + (f" between {parsed.date_from} and {parsed.date_to}" if parsed.date_from else "")
+            )
+        
+        lines = [f"📊 Found {len(docs)} mortgage offer(s) for {parsed.property_address}:"]
+        for doc in docs:
+            lines.append(f"• {doc.title} ({doc.ingested_at.strftime('%Y-%m-%d')})")
+            if doc.vendor:
+                lines.append(f"  Lender: {doc.vendor}")
+            if doc.amount:
+                lines.append(f"  Amount: £{doc.amount:,.0f}")
+            if doc.summary:
+                lines.append(f"  Summary: {doc.summary[:120]}")
+        
+        return TelegramReply(text="\n".join(lines))
+
+    def _handle_epc_expiry(self, parsed: ParsedNLQuery) -> TelegramReply:
+        """Check EPC certificate expiry for a property."""
+        if not parsed.property_address:
+            return TelegramReply(
+                text="I couldn't identify a property address. Please include it in your question."
+            )
+        
+        # Query memory for EPC documents
+        request = MemoryQueryInput(
+            query=f"EPC certificate expiry {parsed.property_address}",
+            property_address=parsed.property_address,
+            document_type="epc_certificate",
+            top_k=5,
+        )
+        matches = self._memory_store.query(request)
+        
+        if not matches:
+            return TelegramReply(
+                text=f"No EPC certificate found for {parsed.property_address}. "
+                     "Upload the EPC certificate document to get expiry information."
+            )
+        
+        # Use LLM to answer if available
+        if self._llm_client:
+            context = "\n".join([m.text for m in matches[:3]])
+            try:
+                answer = self._llm_client.answer_question(
+                    question=parsed.raw_question,
+                    context=context,
+                )
+                return TelegramReply(text=f"📋 EPC for {parsed.property_address}:\n\n{answer}")
+            except Exception:
+                pass
+        
+        # Fallback: return the matched text
+        best_match = matches[0]
+        return TelegramReply(
+            text=f"📋 EPC information for {parsed.property_address}:\n"
+                 f"{best_match.text[:300]}\n\n"
+                 f"Source: {best_match.payload.source_uri}"
+        )
+
+    def _handle_mortgage_statements(self, parsed: ParsedNLQuery) -> TelegramReply:
+        """List mortgage statements for a property within date range."""
+        if not parsed.property_address:
+            return TelegramReply(text="I couldn't identify a property address. Please include it.")
+        
+        from datetime import datetime, timezone
+        date_from = None
+        date_to = None
+        if parsed.date_from:
+            date_from = datetime.combine(parsed.date_from, datetime.min.time(), tzinfo=timezone.utc)
+        if parsed.date_to:
+            date_to = datetime.combine(parsed.date_to, datetime.max.time(), tzinfo=timezone.utc)
+        
+        docs = []
+        if self._document_registry:
+            docs = self._document_registry.query(
+                document_type="bank_statement",
+                date_from=date_from,
+                date_to=date_to,
+                limit=50,
+            )
+            if parsed.property_address:
+                docs = [d for d in docs if d.property_address and parsed.property_address.lower() in d.property_address.lower()]
+        
+        if not docs:
+            return TelegramReply(
+                text=f"No mortgage statements found for {parsed.property_address}"
+                     + (f" in the specified date range" if parsed.date_from else "")
+            )
+        
+        lines = [f"📊 Mortgage statements for {parsed.property_address} ({len(docs)} found):"]
+        for doc in docs:
+            lines.append(f"• {doc.title} - {doc.ingested_at.strftime('%Y-%m-%d')}")
+            if doc.amount:
+                lines.append(f"  Amount: £{doc.amount:,.0f}")
+        
+        return TelegramReply(text="\n".join(lines))
+
+    def _handle_tenancy_clause_check(self, parsed: ParsedNLQuery) -> TelegramReply:
+        """Check if a tenancy agreement contains a specific clause."""
+        if not parsed.property_address:
+            return TelegramReply(text="I couldn't identify a property address. Please include it.")
+        
+        clause = parsed.clause_text or "no pet"
+        
+        # Query memory for tenancy agreement
+        request = MemoryQueryInput(
+            query=f"tenancy agreement {parsed.property_address} {clause}",
+            property_address=parsed.property_address,
+            document_type="tenancy_agreement",
+            top_k=5,
+        )
+        matches = self._memory_store.query(request)
+        
+        if not matches:
+            return TelegramReply(
+                text=f"No tenancy agreement found for {parsed.property_address}."
+            )
+        
+        # Use LLM to answer the clause question
+        context = "\n".join([m.text for m in matches[:3]])
+        if self._llm_client:
+            try:
+                answer = self._llm_client.answer_question(
+                    question=f"Does the tenancy agreement for {parsed.property_address} contain a '{clause}' clause?",
+                    context=context,
+                )
+                return TelegramReply(text=f"📜 Tenancy clause check for {parsed.property_address}:\n\n{answer}")
+            except Exception:
+                pass
+        
+        # Fallback: search for clause in text
+        clause_lower = clause.lower()
+        for m in matches:
+            if clause_lower in m.text.lower():
+                return TelegramReply(
+                    text=f"📜 Yes, the tenancy agreement for {parsed.property_address} mentions '{clause}'.\n\n"
+                         f"Source: {m.payload.source_uri}"
+                )
+        
+        return TelegramReply(
+            text=f"📜 No mention of '{clause}' found in the tenancy agreement for {parsed.property_address}.\n"
+                 f"Source: {matches[0].payload.source_uri}"
+        )
+
+    def _handle_bulk_document_links(self, parsed: ParsedNLQuery) -> TelegramReply:
+        """Return links for all documents matching type and date range."""
+        from datetime import datetime, timezone
+        date_from = None
+        date_to = None
+        if parsed.date_from:
+            date_from = datetime.combine(parsed.date_from, datetime.min.time(), tzinfo=timezone.utc)
+        if parsed.date_to:
+            date_to = datetime.combine(parsed.date_to, datetime.max.time(), tzinfo=timezone.utc)
+        
+        docs = []
+        if self._document_registry:
+            docs = self._document_registry.query(
+                document_type=parsed.document_type,
+                date_from=date_from,
+                date_to=date_to,
+                limit=100,
+            )
+        
+        if not docs:
+            return TelegramReply(
+                text="No documents found matching your criteria."
+            )
+        
+        lines = [f"📎 Found {len(docs)} document(s):"]
+        for doc in docs:
+            link = doc.source_uri
+            if doc.archived_file_path:
+                link = doc.archived_file_path
+            lines.append(f"• {doc.title} ({doc.document_type}) - {doc.ingested_at.strftime('%Y-%m-%d')}")
+            lines.append(f"  Link: {link}")
+        
+        return TelegramReply(text="\n".join(lines))
+
+    def _handle_transaction_matching(self, parsed: ParsedNLQuery) -> TelegramReply:
+        """Match a transaction amount to stored invoices."""
+        if parsed.transaction_amount is None:
+            return TelegramReply(text="I couldn't identify a transaction amount. Please specify an amount (e.g. £180).")
+        
+        target_amount = parsed.transaction_amount
+        # Search for invoices in memory
+        query_text = f"invoice amount {target_amount}"
+        if parsed.transaction_date:
+            query_text += f" date {parsed.transaction_date.isoformat()}"
+        
+        request = MemoryQueryInput(
+            query=query_text,
+            date_from=parsed.transaction_date,
+            top_k=10,
+        )
+        matches = self._memory_store.query(request)
+        
+        if not matches:
+            return TelegramReply(
+                text=f"No matching invoices found for £{target_amount:,.2f}"
+                     + (f" on {parsed.transaction_date}" if parsed.transaction_date else "")
+            )
+        
+        # Filter matches by amount proximity
+        relevant = []
+        for m in matches:
+            if m.payload.amount is not None:
+                diff = abs(m.payload.amount - target_amount)
+                if diff < max(target_amount * 0.1, 5.0):  # Within 10% or £5
+                    relevant.append(m)
+        
+        if not relevant:
+            relevant = matches[:3]
+        
+        lines = [f"💰 Found {len(relevant)} potential invoice match(es) for £{target_amount:,.2f}:"]
+        for m in relevant:
+            amount_str = f"£{m.payload.amount:,.2f}" if m.payload.amount else "amount unknown"
+            lines.append(f"• {m.text[:100]}")
+            lines.append(f"  Amount: {amount_str}")
+            lines.append(f"  Source: {m.payload.source_uri}")
+        
+        return TelegramReply(text="\n".join(lines))

@@ -104,11 +104,16 @@ class DocumentIngestionService:
                 source_uri=source_uri,
             )
 
-        # Extract metadata if LLM available
+        # Extract metadata if LLM available (use structured extraction for richer metadata)
         metadata = None
         if self._enable_metadata_extraction and self._llm_client:
             try:
-                metadata = self._llm_client.extract_metadata(text, source_uri)
+                # Try structured metadata first (includes property_address, amount)
+                extract_fn = getattr(self._llm_client, "extract_structured_metadata", None)
+                if extract_fn is None:
+                    extract_fn = getattr(self._llm_client, "extract_metadata", None)
+                if extract_fn is not None:
+                    metadata = extract_fn(text, source_uri)
             except Exception as e:
                 warnings.warn(f"Metadata extraction failed for {source_uri}: {e}")
 
@@ -129,8 +134,15 @@ class DocumentIngestionService:
                 effective_date=effective_date,
                 summary=summary,
                 chunk_count=len(chunks),
+                property_address=getattr(metadata, "property_address", None) if metadata else None,
+                amount=getattr(metadata, "amount", None) if metadata else None,
             )
             self._document_registry.register(doc_info)
+
+        # Extract property and amount from metadata for payload
+        prop_address = getattr(metadata, "property_address", None) if metadata else None
+        doc_type = getattr(metadata, "document_type", None) if metadata else None
+        amount_val = getattr(metadata, "amount", None) if metadata else None
 
         summary_payload = MemoryPayload(
             event_date=event_date,
@@ -143,6 +155,9 @@ class DocumentIngestionService:
             chunk_index=None,
             chunk_count=len(chunks),
             summary=summary,
+            property_address=prop_address,
+            document_type=doc_type,
+            amount=amount_val,
         )
 
         records = [MemoryRecord(id=summary_id, text=summary or text[:1000], payload=summary_payload)]
@@ -159,6 +174,9 @@ class DocumentIngestionService:
                 chunk_index=index,
                 chunk_count=len(chunks),
                 summary=summary,
+                property_address=prop_address,
+                document_type=doc_type,
+                amount=amount_val,
             )
             records.append(MemoryRecord(id=f"{document_id}:chunk:{index}", text=chunk, payload=payload))
 

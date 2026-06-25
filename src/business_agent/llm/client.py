@@ -116,6 +116,121 @@ Only return valid JSON, no other text."""
 
         return response_text.strip()
 
+    def transcribe_audio(self, audio_path: str | Path) -> str:
+        """
+        Transcribe audio file using LLM (voice notes).
+        Supports: ogg, mp3, wav, m4a
+        """
+        audio_path = Path(audio_path)
+        if not audio_path.exists():
+            raise ValueError(f"Audio file not found: {audio_path}")
+
+        with open(audio_path, "rb") as f:
+            audio_data = base64.b64encode(f.read()).decode("utf-8")
+
+        suffix = audio_path.suffix.lower()
+        media_type_map = {
+            ".ogg": "audio/ogg",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".m4a": "audio/mp4",
+        }
+        media_type = media_type_map.get(suffix, "audio/ogg")
+
+        response_text = self._call_llm(
+            model="openai/whisper-large-v3",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": audio_data,
+                                "format": media_type.split("/")[-1],
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": "Transcribe this audio. Return only the transcribed text.",
+                        },
+                    ],
+                }
+            ],
+        )
+
+        return response_text.strip()
+
+    def extract_structured_metadata(
+        self,
+        document_text: str,
+        source_uri: str,
+    ) -> DocumentMetadata:
+        """
+        Extract structured metadata including property address, amount, document type.
+        Richer than extract_metadata - includes property and financial info.
+        """
+        prompt = f"""Analyze this document and extract metadata in JSON format.
+Document source: {source_uri}
+Document content:
+{document_text[:3000]}
+
+Return JSON with these exact fields:
+{{
+  "document_type": "invoice|mortgage_offer|tenancy_agreement|epc_certificate|completion_statement|bank_statement|contract|receipt|statement|report|other",
+  "vendor": "vendor name or null",
+  "department": "department name or null",
+  "keywords": ["keyword1", "keyword2"],
+  "property_address": "full property address if mentioned, or null",
+  "amount": "monetary amount if mentioned (number only), or null"
+}}
+
+Only return valid JSON, no other text."""
+
+        response_text = self._call_llm(
+            model="meta-llama/llama-2-7b-chat",
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        try:
+            data = json.loads(response_text)
+            return DocumentMetadata(
+                document_type=data.get("document_type", "other"),
+                vendor=data.get("vendor"),
+                department=data.get("department"),
+                keywords=data.get("keywords", []),
+                property_address=data.get("property_address"),
+                amount=float(data["amount"]) if data.get("amount") else None,
+            )
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            return DocumentMetadata(
+                document_type="other",
+                vendor=None,
+                department=None,
+                keywords=[],
+            )
+
+    def answer_question(self, question: str, context: str) -> str:
+        """
+        Answer a question based on provided context (RAG).
+        """
+        prompt = f"""Answer the user's question based on the following context.
+If the context doesn't contain the answer, say "I couldn't find that information."
+
+Context:
+{context[:4000]}
+
+Question: {question}
+
+Answer:"""
+
+        response_text = self._call_llm(
+            model="meta-llama/llama-2-7b-chat",
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        return response_text.strip()
+
     def _call_llm(self, model: str, messages: list[dict[str, Any]]) -> str:
         """Make a request to OpenRouter API."""
         headers = {
@@ -155,11 +270,15 @@ class DocumentMetadata:
         vendor: str | None = None,
         department: str | None = None,
         keywords: list[str] | None = None,
+        property_address: str | None = None,
+        amount: float | None = None,
     ) -> None:
         self.document_type = document_type
         self.vendor = vendor
         self.department = department
         self.keywords = keywords or []
+        self.property_address = property_address
+        self.amount = amount
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -167,4 +286,6 @@ class DocumentMetadata:
             "vendor": self.vendor,
             "department": self.department,
             "keywords": self.keywords,
+            "property_address": self.property_address,
+            "amount": self.amount,
         }

@@ -64,3 +64,47 @@ class TelegramBotClient:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
+
+    async def download_file(self, file_id: str) -> bytes:
+        """Download a file from Telegram (voice notes, documents, etc.)."""
+        # Get file path from Telegram
+        url = f"{self._api_base}/bot{self._token}/getFile"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json={"file_id": file_id})
+            response.raise_for_status()
+            data = response.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"Telegram getFile failed: {data}")
+            file_path = data["result"]["file_path"]
+            
+            # Download the actual file
+            download_url = f"https://api.telegram.org/file/bot{self._token}/{file_path}"
+            file_response = await client.get(download_url)
+            file_response.raise_for_status()
+            return file_response.content
+
+    async def send_document(
+        self,
+        chat_id: int,
+        file_path: str,
+        caption: str | None = None,
+    ) -> None:
+        """Send a document file to a chat."""
+        if not self._token:
+            return
+        import httpx as _httpx
+        from pathlib import Path
+        
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        url = f"{self._api_base}/bot{self._token}/sendDocument"
+        async with _httpx.AsyncClient(timeout=60.0) as client:
+            with open(path, "rb") as f:
+                files = {"document": (path.name, f)}
+                data: dict[str, Any] = {"chat_id": chat_id}
+                if caption:
+                    data["caption"] = caption[:1024]
+                response = await client.post(url, files=files, data=data)
+                response.raise_for_status()

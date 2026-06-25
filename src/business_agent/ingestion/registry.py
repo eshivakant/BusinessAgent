@@ -25,6 +25,9 @@ class DocumentInfo(BaseModel):
     effective_date: datetime
     summary: str | None = None
     chunk_count: int = 0
+    property_address: str | None = None
+    property_id: str | None = None
+    amount: float | None = None
 
 
 class DocumentQueryFilter(BaseModel):
@@ -37,6 +40,8 @@ class DocumentQueryFilter(BaseModel):
     date_to: datetime | None = None
     keyword: str | None = None
     limit: int = 20
+    property_address: str | None = None
+    property_id: str | None = None
 
     def matches(self, doc: DocumentInfo) -> bool:
         """Check if document matches all filters."""
@@ -49,6 +54,13 @@ class DocumentQueryFilter(BaseModel):
         if self.date_from and doc.effective_date < self.date_from:
             return False
         if self.date_to and doc.effective_date > self.date_to:
+            return False
+        if self.property_address:
+            if not doc.property_address:
+                return False
+            if self.property_address.lower() not in doc.property_address.lower():
+                return False
+        if self.property_id and doc.property_id != self.property_id:
             return False
         if self.keyword:
             keyword_lower = self.keyword.lower()
@@ -70,7 +82,11 @@ class DocumentRegistry:
         """Retrieve a document by ID."""
         raise NotImplementedError
 
-    def query(self, filters: DocumentQueryFilter) -> list[DocumentInfo]:
+    def query(
+        self,
+        filters: DocumentQueryFilter | None = None,
+        **kwargs: object,
+    ) -> list[DocumentInfo]:
         """Query documents by filters."""
         raise NotImplementedError
 
@@ -91,7 +107,35 @@ class InMemoryDocumentRegistry(DocumentRegistry):
     def get(self, document_id: str) -> DocumentInfo | None:
         return self.documents.get(document_id)
 
-    def query(self, filters: DocumentQueryFilter) -> list[DocumentInfo]:
+    def query(
+        self,
+        filters: DocumentQueryFilter | None = None,
+        *,
+        document_type: str | None = None,
+        vendor: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        limit: int = 100,
+        property_address: str | None = None,
+        property_id: str | None = None,
+        keyword: str | None = None,
+    ) -> list[DocumentInfo]:
+        """Query documents by filters.
+
+        Accepts either a DocumentQueryFilter object or keyword arguments.
+        Keyword arguments take precedence when both are provided.
+        """
+        if filters is None:
+            filters = DocumentQueryFilter(
+                document_type=document_type,
+                vendor=vendor,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+                property_address=property_address,
+                property_id=property_id,
+                keyword=keyword,
+            )
         matches = [doc for doc in self.documents.values() if filters.matches(doc)]
         return matches[: filters.limit]
 

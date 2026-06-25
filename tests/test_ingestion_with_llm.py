@@ -235,6 +235,7 @@ def test_ingest_metadata_extraction_failure_graceful(ingestion_service, memory_s
     # Mock LLM to fail
     ingestion_service._llm_client = MagicMock()
     ingestion_service._llm_client.extract_metadata.side_effect = Exception("LLM API error")
+    ingestion_service._llm_client.extract_structured_metadata.side_effect = Exception("LLM API error")
 
     with NamedTemporaryFile(mode="w", suffix=".txt", delete=False, dir="/tmp") as f:
         f.write("Test document")
@@ -288,12 +289,14 @@ def test_ingest_ocr_failure_graceful(ingestion_service):
     # Mock LLM client to fail on OCR but succeed on metadata
     ingestion_service._llm_client = MagicMock()
     ingestion_service._llm_client.ocr_image.side_effect = Exception("OCR failed")
-    ingestion_service._llm_client.extract_metadata.return_value = DocumentMetadata(
+    mock_metadata = DocumentMetadata(
         document_type="invoice",
         vendor="TestVendor",
         department="Finance",
         keywords=["test", "invoice"]
     )
+    ingestion_service._llm_client.extract_metadata.return_value = mock_metadata
+    ingestion_service._llm_client.extract_structured_metadata.return_value = mock_metadata
 
     with NamedTemporaryFile(mode="w", suffix=".jpg", delete=False, dir="/tmp") as f:
         f.write("JPEG content")

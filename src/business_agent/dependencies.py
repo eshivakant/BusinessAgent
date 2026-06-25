@@ -10,6 +10,7 @@ from business_agent.ingestion.summarizer import ExtractiveSummarizer
 from business_agent.llm.client import LLMClient
 from business_agent.memory.embeddings import DeterministicEmbeddingService
 from business_agent.memory.store import QdrantMemoryStore
+from business_agent.memory.text_memorization import TextMemorizationService
 from business_agent.orchestrator.conversation import ConversationStore, RedisConversationStore
 from business_agent.orchestrator.service import BusinessOrchestrator
 from business_agent.property.registry import InMemoryPropertyRegistry, PropertyRegistry
@@ -136,6 +137,8 @@ def get_orchestrator() -> BusinessOrchestrator:
         sql_reader=get_sql_reader(),
         document_registry=get_document_registry(),
         property_registry=get_property_registry(),
+        llm_client=get_llm_client(),
+        text_memorization_service=get_text_memorization_service(),
     )
 
 
@@ -143,3 +146,8 @@ def get_orchestrator() -> BusinessOrchestrator:
 def get_telegram_client() -> TelegramBotClient:
     settings = get_settings()
     return TelegramBotClient(token=settings.telegram_bot_token, api_base=settings.telegram_api_base)
+
+
+@lru_cache
+def get_text_memorization_service() -> TextMemorizationService:
+    return TextMemorizationService(memory_store=get_memory_store())

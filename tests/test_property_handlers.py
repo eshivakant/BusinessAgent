@@ -166,10 +166,11 @@ class TestPropertyCommandHandlers:
         assert "Could not parse property command" in reply.text
         assert "requires a property ID" in reply.text
     
-    def test_property_add_not_implemented(self, orchestrator):
+    def test_property_add_starts_conversation(self, orchestrator):
         reply = orchestrator.handle_telegram_message_with_ui(chat_id=12345, message_text="/property add")
-        assert "not yet implemented" in reply.text
-        assert "POST /api/properties" in reply.text
+        assert "Let's add a new property" in reply.text
+        assert "provide the property address" in reply.text
+        assert "/cancel" in reply.text
     
     def test_property_unknown_subcommand(self, orchestrator):
         reply = orchestrator.handle_telegram_message_with_ui(chat_id=12345, message_text="/property delete prop1")
@@ -195,10 +196,11 @@ class TestMortgageCommandHandlers:
         assert "1 mortgage(s) expiring within 12 months" in reply.text
         assert "Big Bank" in reply.text
     
-    def test_mortgage_add_not_implemented(self, orchestrator):
+    def test_mortgage_add_starts_conversation(self, orchestrator):
         reply = orchestrator.handle_telegram_message_with_ui(chat_id=12345, message_text="/mortgage add prop1")
-        assert "not yet implemented" in reply.text
-        assert "POST /api/mortgages" in reply.text
+        assert "Let's add a mortgage for property prop1" in reply.text
+        assert "lender name" in reply.text
+        assert "/cancel" in reply.text
     
     def test_mortgage_add_missing_property_id(self, orchestrator):
         reply = orchestrator.handle_telegram_message_with_ui(chat_id=12345, message_text="/mortgage add")

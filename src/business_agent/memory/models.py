@@ -16,6 +16,10 @@ class MemoryPayload(BaseModel):
     chunk_index: int | None = None
     chunk_count: int | None = None
     summary: str | None = None
+    property_address: str | None = None
+    property_id: str | None = None
+    document_type: str | None = None
+    amount: float | None = None
 
 
 class MemoryRecord(BaseModel):
@@ -38,6 +42,10 @@ class MemoryQueryInput(BaseModel):
     date_to: date | None = None
     source_type: str | None = None
     source_uri: str | None = None
+    property_address: str | None = None
+    property_id: str | None = None
+    document_type: str | None = None
+    record_type: str | None = None
 
     @model_validator(mode="after")
     def validate_dates(self) -> "MemoryQueryInput":

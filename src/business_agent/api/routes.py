@@ -90,11 +90,32 @@ async def telegram_webhook(
 
     chat = message.get("chat")
     text = message.get("text")
-    if not isinstance(chat, dict) or not isinstance(text, str):
+    if not isinstance(chat, dict):
         return {"ok": True, "ignored": True}
 
     chat_id = chat.get("id")
     if not isinstance(chat_id, int):
+        return {"ok": True, "ignored": True}
+
+    # Handle voice messages
+    voice = message.get("voice")
+    if isinstance(voice, dict):
+        return await _handle_voice_message(chat_id=chat_id, voice=voice, settings=settings)
+
+    # Handle document uploads (files sent to the bot)
+    document = message.get("document")
+    if isinstance(document, dict):
+        return await _handle_document_upload(chat_id=chat_id, document=document, settings=settings, caption=text)
+
+    # Handle photo uploads
+    photos = message.get("photo")
+    if isinstance(photos, list) and len(photos) > 0:
+        # Use the largest photo
+        largest_photo = photos[-1]
+        if isinstance(largest_photo, dict):
+            return await _handle_photo_upload(chat_id=chat_id, photo=largest_photo, settings=settings, caption=text)
+
+    if not isinstance(text, str):
         return {"ok": True, "ignored": True}
 
     normalized_text = text.strip()
@@ -118,6 +139,187 @@ async def telegram_webhook(
         return {"ok": True}
 
     return {"ok": True, "response_preview": reply.text}
+
+
+async def _handle_voice_message(
+    chat_id: int,
+    voice: dict[str, Any],
+    settings: Any,
+) -> dict[str, Any]:
+    """Handle a Telegram voice message: download, transcribe, store, and respond."""
+    from business_agent.dependencies import get_llm_client, get_text_memorization_service
+    
+    file_id = voice.get("file_id")
+    if not file_id:
+        return {"ok": True, "error": "No file_id in voice message"}
+    
+    try:
+        telegram_client = get_telegram_client()
+        audio_data = await telegram_client.download_file(file_id)
+        
+        # Save to temp file
+        import tempfile
+        from pathlib import Path
+        import uuid
+        
+        temp_dir = Path(tempfile.gettempdir())
+        temp_path = temp_dir / f"voice_{uuid.uuid4().hex}.ogg"
+        temp_path.write_bytes(audio_data)
+        
+        # Transcribe
+        llm_client = get_llm_client()
+        if llm_client:
+            transcription = llm_client.transcribe_audio(str(temp_path))
+        else:
+            transcription = "[Voice note received but LLM not configured for transcription]"
+        
+        temp_path.unlink(missing_ok=True)
+        
+        # Store in memory
+        memo_service = get_text_memorization_service()
+        record_id = memo_service.memorize_voice_transcription(
+            transcription=transcription,
+            audio_file_id=file_id,
+            chat_id=chat_id,
+        )
+        
+        # Send confirmation
+        reply_text = f"🎙️ Voice note transcribed and stored.\n\nTranscription:\n{transcription[:1000]}"
+        if settings.telegram_bot_token:
+            await telegram_client.send_message(chat_id=chat_id, text=reply_text)
+            return {"ok": True}
+        
+        return {"ok": True, "response_preview": reply_text}
+    except Exception as e:
+        error_msg = f"❌ Failed to process voice note: {e}"
+        if settings.telegram_bot_token:
+            await get_telegram_client().send_message(chat_id=chat_id, text=error_msg)
+        return {"ok": False, "error": str(e)}
+
+
+async def _handle_document_upload(
+    chat_id: int,
+    document: dict[str, Any],
+    settings: Any,
+    caption: str | None = None,
+) -> dict[str, Any]:
+    """Handle a document file uploaded to the bot."""
+    from business_agent.dependencies import get_telegram_client
+    
+    file_id = document.get("file_id")
+    file_name = document.get("file_name", "unknown")
+    mime_type = document.get("mime_type", "application/octet-stream")
+    
+    if not file_id:
+        return {"ok": True, "error": "No file_id in document"}
+    
+    try:
+        telegram_client = get_telegram_client()
+        file_data = await telegram_client.download_file(file_id)
+        
+        # Save to ingestion directory
+        from pathlib import Path
+        import uuid
+        
+        # Use the ingestion allowed dir
+        ingest_dir = Path(settings.ingestion_allowed_local_dir)
+        ingest_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = f"{uuid.uuid4().hex}_{file_name}"
+        file_path = ingest_dir / safe_name
+        file_path.write_bytes(file_data)
+        
+        # Trigger ingestion
+        source_uri = str(file_path)
+        orchestrator = get_orchestrator()
+        
+        # Use caption as event_date hint if it looks like a date
+        event_date = None
+        if caption:
+            from datetime import date as date_cls
+            try:
+                parts = caption.strip().split("-")
+                if len(parts) == 3:
+                    event_date = date_cls(int(parts[0]), int(parts[1]), int(parts[2]))
+            except (ValueError, IndexError):
+                pass
+        
+        result = orchestrator.ingest_document_now(
+            source_uri=source_uri,
+            event_date=event_date,
+            requester_id=chat_id,
+        )
+        
+        reply_text = f"📄 Document ingested: {file_name}\nID: {result.document_id}\nChunks: {result.chunk_count}"
+        if settings.telegram_bot_token:
+            await telegram_client.send_message(chat_id=chat_id, text=reply_text)
+            return {"ok": True}
+        
+        return {"ok": True, "response_preview": reply_text}
+    except Exception as e:
+        error_msg = f"❌ Failed to process document: {e}"
+        if settings.telegram_bot_token:
+            await get_telegram_client().send_message(chat_id=chat_id, text=error_msg)
+        return {"ok": False, "error": str(e)}
+
+
+async def _handle_photo_upload(
+    chat_id: int,
+    photo: dict[str, Any],
+    settings: Any,
+    caption: str | None = None,
+) -> dict[str, Any]:
+    """Handle a photo uploaded to the bot (OCR + ingestion)."""
+    from business_agent.dependencies import get_telegram_client
+    
+    file_id = photo.get("file_id")
+    if not file_id:
+        return {"ok": True, "error": "No file_id in photo"}
+    
+    try:
+        telegram_client = get_telegram_client()
+        file_data = await telegram_client.download_file(file_id)
+        
+        # Save to ingestion directory
+        from pathlib import Path
+        import uuid
+        
+        ingest_dir = Path(settings.ingestion_allowed_local_dir)
+        ingest_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = f"{uuid.uuid4().hex}_photo.jpg"
+        file_path = ingest_dir / safe_name
+        file_path.write_bytes(file_data)
+        
+        # Trigger ingestion (the ingestion service will handle OCR)
+        source_uri = str(file_path)
+        orchestrator = get_orchestrator()
+        
+        event_date = None
+        if caption:
+            from datetime import date as date_cls
+            try:
+                parts = caption.strip().split("-")
+                if len(parts) == 3:
+                    event_date = date_cls(int(parts[0]), int(parts[1]), int(parts[2]))
+            except (ValueError, IndexError):
+                pass
+        
+        result = orchestrator.ingest_document_now(
+            source_uri=source_uri,
+            event_date=event_date,
+            requester_id=chat_id,
+        )
+        
+        reply_text = f"🖼️ Photo ingested and OCR processed.\nID: {result.document_id}\nChunks: {result.chunk_count}"
+        if settings.telegram_bot_token:
+            await telegram_client.send_message(chat_id=chat_id, text=reply_text)
+            return {"ok": True}
+        
+        return {"ok": True, "response_preview": reply_text}
+    except Exception as e:
+        error_msg = f"❌ Failed to process photo: {e}"
+        if settings.telegram_bot_token:
+            await get_telegram_client().send_message(chat_id=chat_id, text=error_msg)
+        return {"ok": False, "error": str(e)}
 
 
 @router.post(
