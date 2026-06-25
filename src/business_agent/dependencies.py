@@ -4,8 +4,10 @@ from functools import lru_cache
 
 from business_agent.config import get_settings
 from business_agent.data.readonly_sql import ReadOnlySQLDataAccess
+from business_agent.ingestion.registry import DocumentRegistry, InMemoryDocumentRegistry
 from business_agent.ingestion.service import DocumentIngestionService
 from business_agent.ingestion.summarizer import ExtractiveSummarizer
+from business_agent.llm.client import LLMClient
 from business_agent.memory.embeddings import DeterministicEmbeddingService
 from business_agent.memory.store import QdrantMemoryStore
 from business_agent.orchestrator.conversation import ConversationStore, RedisConversationStore
@@ -32,6 +34,23 @@ def get_memory_store() -> QdrantMemoryStore:
         distance=settings.qdrant_distance,
         embedding_service=get_embedding_service(),
     )
+
+
+@lru_cache
+def get_llm_client() -> LLMClient | None:
+    settings = get_settings()
+    if not settings.llm_openrouter_api_key:
+        return None
+    return LLMClient(
+        api_key=settings.llm_openrouter_api_key,
+        base_url=settings.llm_openrouter_base_url,
+        request_timeout=settings.llm_request_timeout,
+    )
+
+
+@lru_cache
+def get_document_registry() -> DocumentRegistry:
+    return InMemoryDocumentRegistry()
 
 
 @lru_cache

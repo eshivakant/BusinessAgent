@@ -9,7 +9,7 @@ import httpx
 from docx import Document
 from pypdf import PdfReader
 
-SUPPORTED_SOURCE_TYPES = {"txt", "pdf", "docx"}
+SUPPORTED_SOURCE_TYPES = {"txt", "pdf", "docx", "png", "jpg", "jpeg", "gif", "webp"}
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,8 @@ def resolve_source_type(source_uri: str, content_type: str | None) -> str:
         return "pdf"
     if suffix == ".docx":
         return "docx"
+    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        return suffix.lstrip(".")
 
     if content_type:
         lowered = content_type.lower()
@@ -64,8 +66,16 @@ def resolve_source_type(source_uri: str, content_type: str | None) -> str:
             return "pdf"
         if "application/vnd.openxmlformats-officedocument.wordprocessingml.document" in lowered:
             return "docx"
+        if "image/png" in lowered:
+            return "png"
+        if "image/jpeg" in lowered:
+            return "jpg"
+        if "image/gif" in lowered:
+            return "gif"
+        if "image/webp" in lowered:
+            return "webp"
 
-    raise ValueError("Unsupported source type. Use txt, pdf, or docx.")
+    raise ValueError("Unsupported source type. Use txt, pdf, docx, or image (png/jpg/jpeg/gif/webp).")
 
 
 def parse_document_bytes(content: bytes, source_type: str) -> str:
@@ -77,6 +87,8 @@ def parse_document_bytes(content: bytes, source_type: str) -> str:
     if source_type == "docx":
         document = Document(BytesIO(content))
         return "\n".join(paragraph.text for paragraph in document.paragraphs)
+    if source_type in {"png", "jpg", "jpeg", "gif", "webp"}:
+        return f"[IMAGE: {source_type.upper()} - OCR needed]"
     raise ValueError(f"Unsupported source type: {source_type}")
 
 

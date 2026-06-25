@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     ingestion_chunk_overlap: int = 200
     ingestion_summary_sentences: int = 5
     ingestion_max_document_chars: int = 200000
+    ingestion_enable_metadata_extraction: bool = True
+
+    llm_openrouter_api_key: str | None = None
+    llm_openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    llm_metadata_model: str = "meta-llama/llama-2-7b-chat"
+    llm_ocr_model: str = "gpt-4-vision"
+    llm_request_timeout: int = 60
 
     sql_database_url: str | None = None
     sql_allowed_tables: str = ""
