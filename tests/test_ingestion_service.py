@@ -30,6 +30,7 @@ def test_ingestion_service_writes_summary_and_chunks(monkeypatch) -> None:
         chunk_overlap=5,
         max_document_chars=1000,
         allowed_local_dir="/data/docs",
+        archive_enabled=False,  # Disable archival for this test
     )
 
     monkeypatch.setattr(
@@ -69,6 +70,7 @@ def test_ingestion_service_uses_ingested_at_when_event_date_missing(monkeypatch)
         chunk_overlap=10,
         max_document_chars=1000,
         allowed_local_dir="/data/docs",
+        archive_enabled=False,
     )
 
     monkeypatch.setattr(
@@ -96,6 +98,7 @@ def test_ingestion_service_applies_max_document_chars(monkeypatch) -> None:
         chunk_overlap=10,
         max_document_chars=25,
         allowed_local_dir="/data/docs",
+        archive_enabled=False,
     )
 
     monkeypatch.setattr(

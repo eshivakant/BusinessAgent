@@ -50,6 +50,8 @@ def get_ingestion_service() -> DocumentIngestionService:
         chunk_overlap=settings.ingestion_chunk_overlap,
         max_document_chars=settings.ingestion_max_document_chars,
         allowed_local_dir=settings.ingestion_allowed_local_dir,
+        archive_dir=settings.ingestion_archive_dir,
+        archive_enabled=settings.ingestion_archive_enabled,
     )
 
 

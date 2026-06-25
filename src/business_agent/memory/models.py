@@ -11,6 +11,7 @@ class MemoryPayload(BaseModel):
     effective_date: datetime
     source_type: str
     source_uri: str
+    archived_file_path: str | None = None
     record_type: str
     chunk_index: int | None = None
     chunk_count: int | None = None

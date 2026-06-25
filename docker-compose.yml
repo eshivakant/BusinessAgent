@@ -15,6 +15,7 @@ services:
         condition: service_started
     volumes:
       - ./data/docs:/data/docs:ro
+      - ./data/archive:/data/archive
     labels:
       - "traefik.enable=${TRAEFIK_ENABLE:-false}"
       - "traefik.docker.network=${EXTERNAL_DOCKER_NETWORK:-app-network}"
@@ -41,6 +42,7 @@ services:
         condition: service_started
     volumes:
       - ./data/docs:/data/docs:ro
+      - ./data/archive:/data/archive
     networks:
       - internal
       - app-network

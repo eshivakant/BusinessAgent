@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     qdrant_distance: QdrantDistance = "Cosine"
 
     ingestion_allowed_local_dir: str = "/data/docs"
+    ingestion_archive_dir: str = "/data/archive"
+    ingestion_archive_enabled: bool = True
     ingestion_chunk_size: int = 1200
     ingestion_chunk_overlap: int = 200
     ingestion_summary_sentences: int = 5

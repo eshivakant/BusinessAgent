@@ -28,9 +28,20 @@ Each memory payload stores:
 - `effective_date` (always present: `event_date` at 00:00 UTC, otherwise `ingested_at`)
 - `source_type`
 - `source_uri`
+- `archived_file_path` (path to original document on disk, if archival enabled)
 
 Date filters are applied against `effective_date`.  
 This makes behavior explicit when source documents do not include a natural event date.
+
+### Document archival
+
+When documents are ingested, original files are automatically archived to disk (if `INGESTION_ARCHIVE_ENABLED=true`):
+
+- **Storage:** `${INGESTION_ARCHIVE_DIR}/{document_id}/original.{ext}` (organized by ingestion timestamp)
+- **Metadata:** Each memory record links to archived path via `archived_file_path` payload field
+- **Non-critical:** If archival fails (permission, storage, network), ingestion continues; archival is logged but does not block
+
+This allows audit trails and re-processing of source documents without re-fetching or re-uploading.
 
 ### Telegram conversation continuity (bounded context)
 
@@ -189,3 +200,31 @@ Install dependencies and run tests:
 python -m pip install -r requirements-dev.lock
 python -m pytest
 ```
+
+## Configuration reference
+
+Key environment variables (see `.env.example` for all options):
+
+**Telegram:**
+- `TELEGRAM_BOT_TOKEN` (required) – Bot token from BotFather
+- `TELEGRAM_WEBHOOK_SECRET` (optional) – Secret for webhook signature validation
+
+**Memory & retrieval:**
+- `QDRANT_URL` (default: `http://qdrant:6333`)
+- `QDRANT_COLLECTION` (default: `business_agent_memory`)
+- `CONVERSATION_ENABLED` (default: `true`)
+- `CONVERSATION_WINDOW_MESSAGES` (default: `8`) – Recent turns to keep in chat context
+
+**Document ingestion:**
+- `INGESTION_ALLOWED_LOCAL_DIR` (default: `/data/docs`) – Base directory for local file uploads
+- `INGESTION_ARCHIVE_DIR` (default: `/data/archive`) – Where to archive original documents
+- `INGESTION_ARCHIVE_ENABLED` (default: `true`) – Enable original document archival
+- `INGESTION_CHUNK_SIZE` (default: `1200`) – Characters per chunk
+- `INGESTION_CHUNK_OVERLAP` (default: `200`) – Overlap between chunks
+- `INGESTION_MAX_DOCUMENT_CHARS` (default: `200000`) – Max document size to ingest
+
+**SQL (optional, read-only only):**
+- `SQL_DATABASE_URL` – Connection string (e.g., `postgresql://user:pass@host/dbname`)
+- `SQL_ALLOWED_TABLES` – Comma-separated list of safe tables
+- `SQL_QUERY_LIMIT_DEFAULT` (default: `100`)
+- `SQL_QUERY_LIMIT_MAX` (default: `1000`)
