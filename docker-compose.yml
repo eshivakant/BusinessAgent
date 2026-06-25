@@ -1,0 +1,77 @@
+services:
+  app:
+    build:
+      context: .
+    image: business-agent:latest
+    env_file:
+      - .env
+    command: uvicorn business_agent.main:app --host 0.0.0.0 --port ${APP_PORT:-8080}
+    ports:
+      - "${APP_PORT:-8080}:${APP_PORT:-8080}"
+    depends_on:
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+    volumes:
+      - ./data/docs:/data/docs:ro
+    labels:
+      - "traefik.enable=${TRAEFIK_ENABLE:-false}"
+      - "traefik.docker.network=${EXTERNAL_DOCKER_NETWORK:-app-network}"
+      - "traefik.http.routers.business-agent.rule=Host(`${TRAEFIK_HOST:-business-agent.local}`)"
+      - "traefik.http.routers.business-agent.entrypoints=websecure"
+      - "traefik.http.routers.business-agent.tls.certresolver=letsencrypt"
+      - "traefik.http.services.business-agent.loadbalancer.server.port=${APP_PORT:-8080}"
+    networks:
+      - internal
+      - app-network
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+    image: business-agent:latest
+    env_file:
+      - .env
+    command: python -m business_agent.worker.run_worker
+    depends_on:
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+    volumes:
+      - ./data/docs:/data/docs:ro
+    networks:
+      - internal
+      - app-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.14.1
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    networks:
+      - internal
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  qdrant_storage:
+
+networks:
+  internal:
+    driver: bridge
+  app-network:
+    name: ${EXTERNAL_DOCKER_NETWORK:-app-network}
+    external: ${APP_NETWORK_EXTERNAL:-true}
