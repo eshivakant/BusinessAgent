@@ -197,3 +197,109 @@ def parse_list_command(raw_text: str) -> ListCommand:
         limit=limit,
     )
 
+
+# Property Management Commands
+
+@dataclass(frozen=True)
+class PropertyListCommand:
+    """Command to list properties."""
+    status: str | None = None  # "owned", "under_offer", etc.
+
+
+@dataclass(frozen=True)
+class PropertyShowCommand:
+    """Command to show property details."""
+    property_id: str
+
+
+@dataclass(frozen=True)
+class MortgageExpiringCommand:
+    """Command to list expiring mortgages."""
+    months: int = 6
+
+
+def parse_property_command(raw_text: str) -> PropertyListCommand | PropertyShowCommand | str:
+    """Parse /property commands.
+    
+    Examples:
+      /property list
+      /property list status=owned
+      /property show abc123
+    
+    Returns command object or "add" for interactive add flow.
+    """
+    text = raw_text.strip()
+    if text.startswith("/property"):
+        text = text[9:].strip()
+    elif text.startswith("property"):
+        text = text[8:].strip()
+    
+    if not text or text == "list":
+        return PropertyListCommand()
+    
+    if text == "add":
+        return "add"  # Trigger interactive flow
+    
+    tokens = shlex.split(text)
+    if not tokens:
+        return PropertyListCommand()
+    
+    action = tokens[0].lower()
+    
+    if action == "list":
+        # Parse optional status filter
+        status = None
+        for token in tokens[1:]:
+            if "=" in token:
+                key, value = token.split("=", 1)
+                if key.strip().lower() == "status":
+                    status = value.strip()
+        return PropertyListCommand(status=status)
+    
+    elif action == "show":
+        if len(tokens) < 2:
+            raise ValueError("property show requires a property ID")
+        return PropertyShowCommand(property_id=tokens[1])
+    
+    else:
+        raise ValueError(f"Unknown property subcommand: {action}. Try: list, show, add")
+
+
+def parse_mortgage_command(raw_text: str) -> MortgageExpiringCommand | str:
+    """Parse /mortgage commands.
+    
+    Examples:
+      /mortgage expiring
+      /mortgage expiring months=3
+      /mortgage add property123
+    
+    Returns command object or "add:<property_id>" for add flow.
+    """
+    text = raw_text.strip()
+    if text.startswith("/mortgage"):
+        text = text[9:].strip()
+    elif text.startswith("mortgage"):
+        text = text[8:].strip()
+    
+    tokens = shlex.split(text)
+    if not tokens:
+        return MortgageExpiringCommand()
+    
+    action = tokens[0].lower()
+    
+    if action == "expiring":
+        months = 6
+        for token in tokens[1:]:
+            if "=" in token:
+                key, value = token.split("=", 1)
+                if key.strip().lower() == "months":
+                    months = int(value.strip())
+        return MortgageExpiringCommand(months=months)
+    
+    elif action == "add":
+        if len(tokens) < 2:
+            raise ValueError("mortgage add requires a property ID")
+        return f"add:{tokens[1]}"  # Return property_id for add flow
+    
+    else:
+        raise ValueError(f"Unknown mortgage subcommand: {action}. Try: expiring, add")
