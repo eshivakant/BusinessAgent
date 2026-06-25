@@ -10,7 +10,9 @@ from business_agent.api.security import verify_internal_api_token
 from business_agent.config import get_settings
 from business_agent.data.readonly_sql import SQLReadRequest, SQLReadResponse
 from business_agent.dependencies import (
+    get_document_registry,
     get_orchestrator,
+    get_property_registry,
     get_sql_reader,
     get_telegram_client,
     get_telegram_ui_state,
@@ -433,3 +435,234 @@ def download_document(
         media_type="application/octet-stream",
     )
 
+
+# Property Management APIs
+
+class PropertyCreateRequest(BaseModel):
+    """Request to create a new property."""
+    id: str = Field(min_length=1)
+    address: str = Field(min_length=1)
+    purchase_date: date | None = None
+    purchase_price: float | None = None
+    current_value: float | None = None
+    status: str = "viewing"  # Default to viewing
+    bedrooms: int | None = None
+    bathrooms: int | None = None
+    square_feet: int | None = None
+    postcode: str | None = None
+    notes: str | None = None
+
+
+class PropertyResponse(BaseModel):
+    """Property response model."""
+    id: str
+    address: str
+    purchase_date: date | None
+    purchase_price: float | None
+    current_value: float | None
+    status: str
+    bedrooms: int | None
+    bathrooms: int | None
+    square_feet: int | None
+    postcode: str | None
+    notes: str | None
+
+
+class MortgageResponse(BaseModel):
+    """Mortgage response model."""
+    id: str
+    property_id: str
+    lender: str
+    principal: float
+    interest_rate: float
+    term_months: int
+    monthly_payment: float
+    end_date: date | None
+    months_until_expiry: int | None
+
+
+class PortfolioSummaryResponse(BaseModel):
+    """Portfolio summary response."""
+    total_properties: int
+    owned_count: int
+    under_offer_count: int
+    viewing_count: int
+    total_monthly_rent: float
+    active_tenants: int
+    open_maintenance_count: int
+    expiring_mortgages_count: int
+
+
+@router.get("/api/properties", response_model=list[PropertyResponse])
+def list_properties(
+    property_status: str | None = None,
+    _: None = Depends(verify_internal_api_token),
+) -> list[PropertyResponse]:
+    """List all properties, optionally filtered by status."""
+    from business_agent.property.models import PropertyStatus
+    from decimal import Decimal
+    
+    registry = get_property_registry()
+    
+    status_filter = None
+    if property_status:
+        try:
+            status_filter = PropertyStatus(property_status)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status: {property_status}. Valid: owned, under_offer, viewing, sold, pending_purchase"
+            )
+    
+    properties = registry.list_properties(status=status_filter)
+    
+    return [
+        PropertyResponse(
+            id=p.id,
+            address=p.address,
+            purchase_date=p.purchase_date,
+            purchase_price=float(p.purchase_price) if p.purchase_price else None,
+            current_value=float(p.current_value) if p.current_value else None,
+            status=p.status.value,
+            bedrooms=p.bedrooms,
+            bathrooms=p.bathrooms,
+            square_feet=p.square_feet,
+            postcode=p.postcode,
+            notes=p.notes,
+        )
+        for p in properties
+    ]
+
+
+@router.post("/api/properties", response_model=PropertyResponse, status_code=201)
+def create_property(
+    request: PropertyCreateRequest,
+    _: None = Depends(verify_internal_api_token),
+) -> PropertyResponse:
+    """Create a new property."""
+    from business_agent.property.models import Property, PropertyStatus
+    from decimal import Decimal
+    
+    registry = get_property_registry()
+    
+    # Check if property already exists
+    if registry.get_property(request.id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Property with ID {request.id} already exists"
+        )
+    
+    # Validate status
+    try:
+        property_status = PropertyStatus(request.status)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid status: {request.status}"
+        )
+    
+    # Create property
+    prop = Property(
+        id=request.id,
+        address=request.address,
+        purchase_date=request.purchase_date,
+        purchase_price=Decimal(str(request.purchase_price)) if request.purchase_price else None,
+        current_value=Decimal(str(request.current_value)) if request.current_value else None,
+        status=property_status,
+        bedrooms=request.bedrooms,
+        bathrooms=request.bathrooms,
+        square_feet=request.square_feet,
+        postcode=request.postcode,
+        notes=request.notes,
+    )
+    
+    registry.add_property(prop)
+    
+    return PropertyResponse(
+        id=prop.id,
+        address=prop.address,
+        purchase_date=prop.purchase_date,
+        purchase_price=float(prop.purchase_price) if prop.purchase_price else None,
+        current_value=float(prop.current_value) if prop.current_value else None,
+        status=prop.status.value,
+        bedrooms=prop.bedrooms,
+        bathrooms=prop.bathrooms,
+        square_feet=prop.square_feet,
+        postcode=prop.postcode,
+        notes=prop.notes,
+    )
+
+
+@router.get("/api/mortgages/expiring", response_model=list[MortgageResponse])
+def list_expiring_mortgages(
+    months: int = 6,
+    _: None = Depends(verify_internal_api_token),
+) -> list[MortgageResponse]:
+    """List mortgages expiring within specified months."""
+    registry = get_property_registry()
+    
+    if months < 1 or months > 120:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="months must be between 1 and 120"
+        )
+    
+    expiring = registry.list_expiring_mortgages(months=months)
+    
+    return [
+        MortgageResponse(
+            id=m.id,
+            property_id=m.property_id,
+            lender=m.lender,
+            principal=float(m.principal),
+            interest_rate=float(m.interest_rate),
+            term_months=m.term_months,
+            monthly_payment=float(m.monthly_payment),
+            end_date=m.end_date,
+            months_until_expiry=m.months_until_expiry(),
+        )
+        for m in expiring
+    ]
+
+
+@router.get("/api/portfolio/summary", response_model=PortfolioSummaryResponse)
+def get_portfolio_summary(
+    expiring_window_months: int = 6,
+    _: None = Depends(verify_internal_api_token),
+) -> PortfolioSummaryResponse:
+    """Get portfolio summary with key metrics."""
+    from business_agent.property.models import PropertyStatus, MaintenanceStatus
+    from decimal import Decimal
+    
+    registry = get_property_registry()
+    
+    # Get all properties
+    all_properties = registry.list_properties()
+    owned = [p for p in all_properties if p.status == PropertyStatus.OWNED]
+    under_offer = [p for p in all_properties if p.status == PropertyStatus.UNDER_OFFER]
+    viewing = [p for p in all_properties if p.status == PropertyStatus.VIEWING]
+    
+    # Calculate total monthly rent from active tenants
+    all_tenants = registry.list_tenants(active_only=True)
+    total_rent = sum(t.monthly_rent for t in all_tenants)
+    
+    # Count open maintenance requests
+    all_maintenance = registry.list_maintenance_requests()
+    open_maintenance = [
+        m for m in all_maintenance 
+        if m.status in (MaintenanceStatus.REPORTED, MaintenanceStatus.QUOTED, MaintenanceStatus.APPROVED, MaintenanceStatus.IN_PROGRESS)
+    ]
+    
+    # Count expiring mortgages
+    expiring_mortgages = registry.list_expiring_mortgages(months=expiring_window_months)
+    
+    return PortfolioSummaryResponse(
+        total_properties=len(all_properties),
+        owned_count=len(owned),
+        under_offer_count=len(under_offer),
+        viewing_count=len(viewing),
+        total_monthly_rent=float(total_rent),
+        active_tenants=len(all_tenants),
+        open_maintenance_count=len(open_maintenance),
+        expiring_mortgages_count=len(expiring_mortgages),
+    )

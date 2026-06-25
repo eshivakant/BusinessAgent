@@ -12,6 +12,7 @@ from business_agent.memory.embeddings import DeterministicEmbeddingService
 from business_agent.memory.store import QdrantMemoryStore
 from business_agent.orchestrator.conversation import ConversationStore, RedisConversationStore
 from business_agent.orchestrator.service import BusinessOrchestrator
+from business_agent.property.registry import InMemoryPropertyRegistry, PropertyRegistry
 from business_agent.telegram.client import TelegramBotClient
 from business_agent.telegram.ui_state import RedisTelegramUiStateStore, TelegramUiStateStore
 from business_agent.worker.queue import RedisSubagentQueue
@@ -51,6 +52,12 @@ def get_llm_client() -> LLMClient | None:
 @lru_cache
 def get_document_registry() -> DocumentRegistry:
     return InMemoryDocumentRegistry()
+
+
+@lru_cache
+def get_property_registry() -> PropertyRegistry:
+    """Get property registry (in-memory for now, upgradeable to SQL)."""
+    return InMemoryPropertyRegistry()
 
 
 @lru_cache
@@ -127,6 +134,8 @@ def get_orchestrator() -> BusinessOrchestrator:
         ingestion_service=get_ingestion_service(),
         conversation_store=get_conversation_store(),
         sql_reader=get_sql_reader(),
+        document_registry=get_document_registry(),
+        property_registry=get_property_registry(),
     )
 
 

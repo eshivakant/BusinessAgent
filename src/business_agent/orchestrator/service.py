@@ -1,24 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from textwrap import shorten
 
 from business_agent.config import get_settings
 from business_agent.data.readonly_sql import ReadOnlySQLDataAccess, SQLReadRequest
+from business_agent.ingestion.registry import DocumentRegistry
 from business_agent.ingestion.service import DocumentIngestionService, IngestionResult
 from business_agent.memory.models import MemoryMatch, MemoryQueryInput
 from business_agent.memory.store import MemoryStore
 from business_agent.orchestrator.commands import (
     AskCommand,
     ListCommand,
+    MortgageExpiringCommand,
+    PropertyListCommand,
+    PropertyShowCommand,
     parse_ask_command,
     parse_data_command,
     parse_ingest_command,
     parse_list_command,
+    parse_mortgage_command,
+    parse_property_command,
     parse_question_with_optional_dates,
 )
 from business_agent.orchestrator.conversation import ConversationStore
+from business_agent.property.registry import PropertyRegistry
 from business_agent.worker.contracts import DocumentIngestionTask, SubagentTaskQueue
 
 
@@ -27,6 +34,9 @@ HELP_TEXT = (
     "/ask [from=YYYY-MM-DD] [to=YYYY-MM-DD] <question>\n"
     "/ingest <source_uri> [event_date=YYYY-MM-DD]\n"
     "/list [type=<type>] [vendor=<vendor>] [date_from=YYYY-MM-DD] [date_to=YYYY-MM-DD] [limit=<n>]\n"
+    "/property list [status=<status>]\n"
+    "/property show <property_id>\n"
+    "/mortgage expiring [months=<n>]\n"
     "/data table=<name> columns=<c1,c2> filters=<key:value,...> limit=<n>\n"
     "/reset\n\n"
     "Tip: keep questions concise. Use date filters for precise retrieval."
@@ -50,12 +60,16 @@ class BusinessOrchestrator:
         ingestion_service: DocumentIngestionService,
         conversation_store: ConversationStore | None = None,
         sql_reader: ReadOnlySQLDataAccess | None = None,
+        document_registry: DocumentRegistry | None = None,
+        property_registry: PropertyRegistry | None = None,
     ) -> None:
         self._memory_store = memory_store
         self._task_queue = task_queue
         self._ingestion_service = ingestion_service
         self._conversation_store = conversation_store
         self._sql_reader = sql_reader
+        self._document_registry = document_registry
+        self._property_registry = property_registry
         self._settings = get_settings()
 
     def handle_telegram_message(self, chat_id: int, message_text: str) -> str:
@@ -71,6 +85,10 @@ class BusinessOrchestrator:
             return TelegramReply(text=HELP_TEXT)
         if text.startswith("/list"):
             return self._handle_list_command(text)
+        if text.startswith("/property"):
+            return self._handle_property_command(text)
+        if text.startswith("/mortgage"):
+            return self._handle_mortgage_command(text)
         if text.startswith("/ingest"):
             return self._handle_ingest_command(text)
         if text.startswith("/data"):
@@ -225,6 +243,139 @@ class BusinessOrchestrator:
         
         text = "\n".join(lines)
         return TelegramReply(text=text, show_actions=False)
+
+    def _handle_property_command(self, text: str) -> TelegramReply:
+        """Handle /property commands."""
+        if self._property_registry is None:
+            return TelegramReply(text="Property registry is not configured.")
+        
+        try:
+            command = parse_property_command(text)
+        except ValueError as exc:
+            return TelegramReply(
+                text=(
+                    f"Could not parse property command: {exc}\n"
+                    "Try: /property list [status=owned] or /property show <property_id>"
+                )
+            )
+        
+        # Handle "add" flow (interactive)
+        if command == "add":
+            return TelegramReply(
+                text="Interactive property add flow not yet implemented. Use API: POST /api/properties"
+            )
+        
+        # Handle list command
+        if isinstance(command, PropertyListCommand):
+            from business_agent.property.models import PropertyStatus
+            
+            status_filter = None
+            if command.status:
+                try:
+                    status_filter = PropertyStatus(command.status)
+                except ValueError:
+                    return TelegramReply(
+                        text=f"Invalid status: {command.status}. Valid: owned, under_offer, viewing, sold, pending_purchase"
+                    )
+            
+            properties = self._property_registry.list_properties(status=status_filter)
+            
+            if not properties:
+                return TelegramReply(text="No properties found.")
+            
+            lines = [f"Found {len(properties)} propert{'y' if len(properties) == 1 else 'ies'}:"]
+            for prop in properties:
+                status_emoji = {"owned": "🏠", "viewing": "👀", "under_offer": "📝"}.get(prop.status.value, "📌")
+                lines.append(f"{status_emoji} {prop.address} ({prop.status.value})")
+                if prop.purchase_price:
+                    lines.append(f"  Purchase: £{prop.purchase_price:,.0f}")
+                if prop.current_value:
+                    lines.append(f"  Current value: £{prop.current_value:,.0f}")
+            
+            return TelegramReply(text="\n".join(lines), show_actions=False)
+        
+        # Handle show command
+        if isinstance(command, PropertyShowCommand):
+            prop = self._property_registry.get_property(command.property_id)
+            if not prop:
+                return TelegramReply(text=f"Property not found: {command.property_id}")
+            
+            lines = [
+                f"🏠 {prop.address}",
+                f"Status: {prop.status.value}",
+            ]
+            if prop.postcode:
+                lines.append(f"Postcode: {prop.postcode}")
+            if prop.bedrooms:
+                lines.append(f"Bedrooms: {prop.bedrooms}")
+            if prop.bathrooms:
+                lines.append(f"Bathrooms: {prop.bathrooms}")
+            if prop.purchase_date and prop.purchase_price:
+                lines.append(f"Purchased: {prop.purchase_date} for £{prop.purchase_price:,.0f}")
+            if prop.current_value:
+                lines.append(f"Current value: £{prop.current_value:,.0f}")
+            if prop.notes:
+                lines.append(f"Notes: {prop.notes}")
+            
+            # Add mortgage info if any
+            mortgages = self._property_registry.list_mortgages(property_id=prop.id)
+            if mortgages:
+                lines.append(f"\n💷 Mortgages ({len(mortgages)}):")
+                for mort in mortgages:
+                    lines.append(f"  • {mort.lender}: £{mort.monthly_payment:,.0f}/mo @ {mort.interest_rate}%")
+            
+            # Add tenant info if any
+            tenants = self._property_registry.list_tenants(property_id=prop.id, active_only=True)
+            if tenants:
+                lines.append(f"\n👤 Active Tenants ({len(tenants)}):")
+                for tenant in tenants:
+                    lines.append(f"  • {tenant.name}: £{tenant.monthly_rent:,.0f}/mo (lease ends {tenant.lease_end})")
+            
+            return TelegramReply(text="\n".join(lines), show_actions=False)
+        
+        return TelegramReply(text="Unknown property command.")
+
+    def _handle_mortgage_command(self, text: str) -> TelegramReply:
+        """Handle /mortgage commands."""
+        if self._property_registry is None:
+            return TelegramReply(text="Property registry is not configured.")
+        
+        try:
+            command = parse_mortgage_command(text)
+        except ValueError as exc:
+            return TelegramReply(
+                text=(
+                    f"Could not parse mortgage command: {exc}\n"
+                    "Try: /mortgage expiring [months=6]"
+                )
+            )
+        
+        # Handle "add" flow (interactive)
+        if isinstance(command, str) and command.startswith("add:"):
+            property_id = command.split(":", 1)[1]
+            return TelegramReply(
+                text=f"Interactive mortgage add flow for property {property_id} not yet implemented. Use API: POST /api/mortgages"
+            )
+        
+        # Handle expiring command
+        if isinstance(command, MortgageExpiringCommand):
+            expiring = self._property_registry.list_expiring_mortgages(months=command.months)
+            
+            if not expiring:
+                return TelegramReply(text=f"No mortgages expiring within {command.months} months.")
+            
+            lines = [f"⚠️ {len(expiring)} mortgage(s) expiring within {command.months} months:"]
+            for mort in expiring:
+                months_left = mort.months_until_expiry()
+                prop = self._property_registry.get_property(mort.property_id)
+                prop_address = prop.address if prop else mort.property_id
+                lines.append(f"• {prop_address} - {mort.lender}")
+                lines.append(f"  Expires in {months_left} month(s) on {mort.end_date}")
+                lines.append(f"  Current rate: {mort.interest_rate}%, £{mort.monthly_payment:,.0f}/mo")
+            
+            return TelegramReply(text="\n".join(lines), show_actions=False)
+        
+        return TelegramReply(text="Unknown mortgage command.")
 
     def _handle_data_command(self, text: str) -> TelegramReply:
         if self._sql_reader is None:
