@@ -3,11 +3,13 @@ from __future__ import annotations
 from functools import lru_cache
 
 from business_agent.config import get_settings
+from business_agent.conveyancing.service import ConveyancingService
 from business_agent.data.readonly_sql import ReadOnlySQLDataAccess
 from business_agent.ingestion.registry import DocumentRegistry, InMemoryDocumentRegistry
 from business_agent.ingestion.service import DocumentIngestionService
 from business_agent.ingestion.summarizer import ExtractiveSummarizer
 from business_agent.llm.client import LLMClient
+from business_agent.maintenance.service import MaintenanceService
 from business_agent.memory.embeddings import DeterministicEmbeddingService
 from business_agent.memory.store import QdrantMemoryStore
 from business_agent.memory.text_memorization import TextMemorizationService
@@ -100,6 +102,36 @@ def get_tenancy_service() -> TenancyService:
 
 
 @lru_cache
+def get_conveyancing_service() -> ConveyancingService:
+    settings = get_settings()
+    return ConveyancingService(
+        property_registry=get_property_registry(),
+        memory_store=get_memory_store(),
+        summarizer=get_summarizer(),
+        chunk_size=settings.ingestion_chunk_size,
+        chunk_overlap=settings.ingestion_chunk_overlap,
+        max_document_chars=settings.ingestion_max_document_chars,
+        storage_dir=settings.conveyancing_docs_dir,
+        allowed_local_dir=settings.ingestion_allowed_local_dir,
+    )
+
+
+@lru_cache
+def get_maintenance_service() -> MaintenanceService:
+    settings = get_settings()
+    return MaintenanceService(
+        property_registry=get_property_registry(),
+        memory_store=get_memory_store(),
+        summarizer=get_summarizer(),
+        chunk_size=settings.ingestion_chunk_size,
+        chunk_overlap=settings.ingestion_chunk_overlap,
+        max_document_chars=settings.ingestion_max_document_chars,
+        storage_dir=settings.maintenance_docs_dir,
+        allowed_local_dir=settings.ingestion_allowed_local_dir,
+    )
+
+
+@lru_cache
 def get_summarizer() -> ExtractiveSummarizer:
     settings = get_settings()
     return ExtractiveSummarizer(max_sentences=settings.ingestion_summary_sentences)
@@ -176,6 +208,8 @@ def get_orchestrator() -> BusinessOrchestrator:
         document_registry=get_document_registry(),
         property_registry=get_property_registry(),
         tenancy_service=get_tenancy_service(),
+        conveyancing_service=get_conveyancing_service(),
+        maintenance_service=get_maintenance_service(),
         llm_client=get_llm_client(),
         text_memorization_service=get_text_memorization_service(),
     )

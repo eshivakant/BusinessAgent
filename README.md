@@ -2,6 +2,8 @@
 
 Production-ready scaffold for a Dockerized multi-agent business assistant with:
 
+For a practical walkthrough of the Telegram and API workflows, see [docs/user-guide.md](docs/user-guide.md).
+
 - Telegram-facing main agent (webhook mode)
 - Orchestrator + worker/subagent task queue
 - Qdrant-backed long-term memory

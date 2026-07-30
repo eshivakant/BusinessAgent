@@ -8,9 +8,11 @@ from textwrap import shorten
 from typing import Any
 
 from business_agent.config import get_settings
+from business_agent.conveyancing.service import ConveyancingService
 from business_agent.data.readonly_sql import ReadOnlySQLDataAccess, SQLReadRequest
 from business_agent.ingestion.registry import DocumentRegistry
 from business_agent.ingestion.service import DocumentIngestionService, IngestionResult
+from business_agent.maintenance.service import MaintenanceService
 from business_agent.memory.models import MemoryMatch, MemoryQueryInput
 from business_agent.memory.store import MemoryStore
 from business_agent.orchestrator.commands import (
@@ -50,6 +52,10 @@ HELP_TEXT = (
     "/tenant show <tenancy_id>\n"
     "/tenant search <query> [tenancy_id=<id>]\n"
     "/agreement generate <tenancy_id>\n"
+    "/conveyancing list\n"
+    "/conveyancing new purchase <property_id>\n"
+    "/conveyancing show <transaction_id>\n"
+    "/maintenance list <property_id>\n"
     "/data table=<name> columns=<c1,c2> filters=<key:value,...> limit=<n>\n"
     "/reset\n\n"
     "📝 You can also send documents (PDF, DOCX, TXT) or photos for automatic ingestion.\n"
@@ -85,6 +91,8 @@ class BusinessOrchestrator:
         document_registry: DocumentRegistry | None = None,
         property_registry: PropertyRegistry | None = None,
         tenancy_service: TenancyService | None = None,
+        conveyancing_service: ConveyancingService | None = None,
+        maintenance_service: MaintenanceService | None = None,
         llm_client: Any | None = None,
         text_memorization_service: Any | None = None,
     ) -> None:
@@ -96,6 +104,8 @@ class BusinessOrchestrator:
         self._document_registry = document_registry
         self._property_registry = property_registry
         self._tenancy_service = tenancy_service
+        self._conveyancing_service = conveyancing_service
+        self._maintenance_service = maintenance_service
         self._llm_client = llm_client
         self._text_memorization_service = text_memorization_service
         self._settings = get_settings()
@@ -141,6 +151,10 @@ class BusinessOrchestrator:
             return self._handle_tenant_command(chat_id, text)
         if text.startswith("/agreement"):
             return self._handle_agreement_command(chat_id, text)
+        if text.startswith("/conveyancing"):
+            return self._handle_conveyancing_command(chat_id, text)
+        if text.startswith("/maintenance"):
+            return self._handle_maintenance_command(chat_id, text)
         if text.startswith("/ingest"):
             return self._handle_ingest_command(text)
         if text.startswith("/data"):
@@ -576,6 +590,100 @@ class BusinessOrchestrator:
                 f"Unresolved placeholders: {unresolved_text}"
             )
         )
+
+    def _handle_conveyancing_command(self, chat_id: int, text: str) -> TelegramReply:
+        if self._conveyancing_service is None:
+            return TelegramReply(text="Conveyancing service is not configured.")
+
+        command_text = text.strip()[13:].strip()
+        if not command_text:
+            return TelegramReply(text="Usage: /conveyancing list | /conveyancing new purchase <property_id> | /conveyancing show <transaction_id>")
+
+        parts = shlex.split(command_text)
+        action = parts[0].lower() if parts else ""
+
+        if action == "list":
+            transactions = self._conveyancing_service.list_transactions()
+            if not transactions:
+                return TelegramReply(text="No conveyancing transactions found.")
+            lines = [f"Found {len(transactions)} transaction(s):"]
+            for transaction in transactions:
+                lines.append(f"• {transaction.id} ({transaction.transaction_type}) stage={transaction.stage}")
+            return TelegramReply(text="\n".join(lines), show_actions=False)
+
+        if action == "new":
+            if len(parts) < 3:
+                return TelegramReply(text="Usage: /conveyancing new purchase <property_id>")
+            transaction_type = parts[1].lower()
+            property_id = parts[2]
+            transaction = self._conveyancing_service.create_transaction(property_id, transaction_type)
+            return TelegramReply(text=f"Created {transaction.transaction_type} transaction {transaction.id} for {property_id}.", show_actions=False)
+
+        if action == "show":
+            if len(parts) < 2:
+                return TelegramReply(text="Usage: /conveyancing show <transaction_id>")
+            transaction = self._conveyancing_service.get_transaction(parts[1])
+            if transaction is None:
+                return TelegramReply(text=f"Transaction not found: {parts[1]}")
+            return TelegramReply(text=f"Transaction {transaction.id}: stage={transaction.stage} type={transaction.transaction_type}", show_actions=False)
+
+        if action == "advance":
+            if len(parts) < 3:
+                return TelegramReply(text="Usage: /conveyancing advance <transaction_id> <stage>")
+            transaction = self._conveyancing_service.advance_stage(parts[1], parts[2])
+            return TelegramReply(text=f"Advanced transaction {transaction.id} to {transaction.stage}.", show_actions=False)
+
+        if action == "compare" and len(parts) > 1 and parts[1].lower() == "mortgages":
+            if len(parts) < 3:
+                return TelegramReply(text="Usage: /conveyancing compare mortgages <transaction_id>")
+            comparisons = self._conveyancing_service.compare_mortgage_offers(parts[2])
+            if not comparisons:
+                return TelegramReply(text="No mortgage offers found for that transaction.")
+            lines = [f"Compared {len(comparisons)} offer(s):"]
+            for item in comparisons:
+                lines.append(f"• {item['lender_name']} total={item['total_cost_5yr']:.2f} recommended={item['recommended']}")
+            return TelegramReply(text="\n".join(lines), show_actions=False)
+
+        return TelegramReply(text="Unknown conveyancing command.")
+
+    def _handle_maintenance_command(self, chat_id: int, text: str) -> TelegramReply:
+        if self._maintenance_service is None:
+            return TelegramReply(text="Maintenance service is not configured.")
+
+        command_text = text.strip()[12:].strip()
+        if not command_text:
+            return TelegramReply(text="Usage: /maintenance list <property_id> | /maintenance new <property_id>")
+
+        parts = shlex.split(command_text)
+        action = parts[0].lower() if parts else ""
+
+        if action == "list":
+            if len(parts) < 2:
+                return TelegramReply(text="Usage: /maintenance list <property_id>")
+            jobs = self._maintenance_service.list_jobs(property_id=parts[1])
+            if not jobs:
+                return TelegramReply(text=f"No maintenance jobs found for property {parts[1]}.")
+            lines = [f"Found {len(jobs)} job(s):"]
+            for job in jobs:
+                lines.append(f"• {job.id} {job.title} stage={job.stage}")
+            return TelegramReply(text="\n".join(lines), show_actions=False)
+
+        if action == "new":
+            if len(parts) < 2:
+                return TelegramReply(text="Usage: /maintenance new <property_id>")
+            job = self._maintenance_service.create_job(property_id=parts[1], title="New maintenance request", description="Logged via Telegram")
+            return TelegramReply(text=f"Created job {job.id} for property {parts[1]}.", show_actions=False)
+
+        if action == "spend":
+            if len(parts) < 2:
+                return TelegramReply(text="Usage: /maintenance spend <property_id> [year=YYYY]")
+            year = None
+            if len(parts) > 2:
+                year = int(parts[2])
+            summary = self._maintenance_service.spend(parts[1], year=year)
+            return TelegramReply(text=f"Total spend: £{summary['total_spend']:.2f}", show_actions=False)
+
+        return TelegramReply(text="Unknown maintenance command.")
 
     def _handle_data_command(self, text: str) -> TelegramReply:
         if self._sql_reader is None:

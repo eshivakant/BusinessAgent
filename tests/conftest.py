@@ -11,9 +11,11 @@ import business_agent.api.app as api_app_module
 import business_agent.api.routes as api_routes_module
 import business_agent.api.security as api_security_module
 import business_agent.orchestrator.service as orchestrator_service_module
+from business_agent.conveyancing.service import ConveyancingService
 from business_agent.ingestion.registry import InMemoryDocumentRegistry
 from business_agent.ingestion.service import DocumentIngestionService
 from business_agent.ingestion.summarizer import ExtractiveSummarizer
+from business_agent.maintenance.service import MaintenanceService
 from business_agent.memory.models import MemoryMatch, MemoryPayload, MemoryRecord
 from business_agent.memory.text_memorization import TextMemorizationService
 from business_agent.orchestrator.conversation import ConversationStore
@@ -177,6 +179,8 @@ class FastE2EHarness:
             ingestion_summary_sentences=2,
             ingestion_max_document_chars=20000,
             ingestion_enable_metadata_extraction=False,
+            conveyancing_docs_dir=str(tmp_path / "conveyancing"),
+            maintenance_docs_dir=str(tmp_path / "maintenance"),
             app_base_url=None,
             app_database_url=None,
             llm_openrouter_api_key=None,
@@ -214,6 +218,26 @@ class FastE2EHarness:
             llm_client=None,
             allowed_local_dir=self.settings.ingestion_allowed_local_dir,
         )
+        self.conveyancing_service = ConveyancingService(
+            property_registry=self.property_registry,
+            memory_store=self.memory_store,
+            summarizer=ExtractiveSummarizer(max_sentences=2),
+            chunk_size=120,
+            chunk_overlap=20,
+            max_document_chars=20000,
+            storage_dir=self.settings.conveyancing_docs_dir,
+            allowed_local_dir=self.settings.ingestion_allowed_local_dir,
+        )
+        self.maintenance_service = MaintenanceService(
+            property_registry=self.property_registry,
+            memory_store=self.memory_store,
+            summarizer=ExtractiveSummarizer(max_sentences=2),
+            chunk_size=120,
+            chunk_overlap=20,
+            max_document_chars=20000,
+            storage_dir=self.settings.maintenance_docs_dir,
+            allowed_local_dir=self.settings.ingestion_allowed_local_dir,
+        )
 
         self.ingestion_service = DocumentIngestionService(
             memory_store=self.memory_store,
@@ -237,6 +261,8 @@ class FastE2EHarness:
             document_registry=self.document_registry,
             property_registry=self.property_registry,
             tenancy_service=self.tenancy_service,
+            conveyancing_service=self.conveyancing_service,
+            maintenance_service=self.maintenance_service,
             llm_client=None,
             text_memorization_service=self.text_memorization_service,
         )
@@ -250,6 +276,8 @@ class FastE2EHarness:
         monkeypatch.setattr(api_routes_module, "get_sql_reader", lambda: self.sql_reader)
         monkeypatch.setattr(api_routes_module, "get_document_registry", lambda: self.document_registry)
         monkeypatch.setattr(api_routes_module, "get_tenancy_service", lambda: self.tenancy_service)
+        monkeypatch.setattr(api_routes_module, "get_conveyancing_service", lambda: self.conveyancing_service)
+        monkeypatch.setattr(api_routes_module, "get_maintenance_service", lambda: self.maintenance_service)
         monkeypatch.setattr(api_routes_module, "get_telegram_client", lambda: self.telegram_client)
         monkeypatch.setattr(api_routes_module, "get_telegram_ui_state", lambda: self.telegram_ui_state)
         monkeypatch.setattr(api_routes_module, "get_text_memorization_service", lambda: self.text_memorization_service, raising=False)

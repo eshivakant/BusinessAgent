@@ -21,6 +21,10 @@ class MemoryPayload(BaseModel):
     tenancy_id: str | None = None
     document_id: str | None = None
     document_type: str | None = None
+    transaction_id: str | None = None
+    document_subtype: str | None = None
+    job_id: str | None = None
+    contractor_name: str | None = None
     amount: float | None = None
 
 

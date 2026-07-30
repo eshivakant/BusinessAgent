@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     tenant_docs_dir: str = "/data/tenant-docs"
     agreement_templates_dir: str = "/data/agreement-templates"
     generated_agreements_dir: str = "/data/generated-agreements"
+    conveyancing_docs_dir: str = "/data/conveyancing"
+    maintenance_docs_dir: str = "/data/maintenance"
     
     app_base_url: str | None = None
     app_database_url: str | None = None

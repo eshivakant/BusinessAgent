@@ -7,14 +7,16 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
 from business_agent.api.security import verify_internal_api_token
 from business_agent.config import get_settings
 from business_agent.data.readonly_sql import SQLReadRequest, SQLReadResponse
 from business_agent.dependencies import (
+    get_conveyancing_service,
     get_document_registry,
+    get_maintenance_service,
     get_orchestrator,
     get_property_registry,
     get_sql_reader,
@@ -129,9 +131,287 @@ class AgreementGenerateRequest(BaseModel):
     missing_values: dict[str, Any] | None = None
 
 
+class ConveyancingCreateRequest(BaseModel):
+    property_id: str = Field(min_length=1)
+    transaction_type: str = Field(min_length=1)
+    stage: str | None = None
+    notes: str | None = None
+
+
+class ConveyancingUpdateRequest(BaseModel):
+    stage: str | None = None
+    notes: str | None = None
+    counterparty_solicitor_name: str | None = None
+    counterparty_solicitor_email: str | None = None
+
+
+class MaintenanceCreateRequest(BaseModel):
+    property_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    urgency: str = "medium"
+    tenancy_id: str | None = None
+
+
+class MaintenanceUpdateRequest(BaseModel):
+    stage: str | None = None
+    contractor_id: str | None = None
+    title: str | None = None
+    description: str | None = None
+    quote_amount: float | None = None
+    approved_amount: float | None = None
+    invoice_amount: float | None = None
+    paid_amount: float | None = None
+    paid_date: date | None = None
+
+
+class ComplianceCreateRequest(BaseModel):
+    property_id: str = Field(min_length=1)
+    certificate_type: str = Field(min_length=1)
+    expiry_date: date | None = None
+
+
+def _serialize_conveyancing_transaction(transaction: Any) -> dict[str, Any]:
+    return {
+        "id": transaction.id,
+        "property_id": transaction.property_id,
+        "transaction_type": transaction.transaction_type,
+        "stage": transaction.stage,
+        "notes": transaction.notes,
+        "counterparty_solicitor_name": transaction.counterparty_solicitor_name,
+        "counterparty_solicitor_email": transaction.counterparty_solicitor_email,
+        "offer_date": transaction.offer_date.isoformat() if transaction.offer_date else None,
+        "solicitor_instructed_date": transaction.solicitor_instructed_date.isoformat() if transaction.solicitor_instructed_date else None,
+        "searches_ordered_date": transaction.searches_ordered_date.isoformat() if transaction.searches_ordered_date else None,
+        "survey_date": transaction.survey_date.isoformat() if transaction.survey_date else None,
+        "mortgage_offer_date": transaction.mortgage_offer_date.isoformat() if transaction.mortgage_offer_date else None,
+        "exchange_date": transaction.exchange_date.isoformat() if transaction.exchange_date else None,
+        "completion_date": transaction.completion_date.isoformat() if transaction.completion_date else None,
+        "target_completion_date": transaction.target_completion_date.isoformat() if transaction.target_completion_date else None,
+    }
+
+
+def _serialize_conveyancing_document(document: Any) -> dict[str, Any]:
+    return {
+        "id": document.id,
+        "transaction_id": document.transaction_id,
+        "document_subtype": document.document_subtype,
+        "filename": document.filename,
+        "stored_path": document.stored_path,
+        "ingested_at": document.ingested_at.isoformat() if document.ingested_at else None,
+        "extracted_fields": document.extracted_fields,
+        "qdrant_ids": document.qdrant_ids,
+    }
+
+
+def _serialize_maintenance_job(job: Any) -> dict[str, Any]:
+    return {
+        "id": job.id,
+        "property_id": job.property_id,
+        "tenancy_id": job.tenancy_id,
+        "title": job.title,
+        "description": job.description,
+        "urgency": job.urgency,
+        "stage": job.stage,
+        "contractor_id": job.contractor_id,
+        "scheduled_date": job.scheduled_date.isoformat() if job.scheduled_date else None,
+        "completed_date": job.completed_date.isoformat() if job.completed_date else None,
+        "quote_amount": float(job.quote_amount) if job.quote_amount is not None else None,
+        "approved_amount": float(job.approved_amount) if job.approved_amount is not None else None,
+        "invoice_amount": float(job.invoice_amount) if job.invoice_amount is not None else None,
+        "paid_amount": float(job.paid_amount) if job.paid_amount is not None else None,
+        "paid_date": job.paid_date.isoformat() if job.paid_date else None,
+        "warranty_until": job.warranty_until.isoformat() if job.warranty_until else None,
+        "notes": job.notes,
+    }
+
+
+def _serialize_maintenance_document(document: Any) -> dict[str, Any]:
+    return {
+        "id": document.id,
+        "job_id": document.job_id,
+        "document_subtype": document.document_subtype,
+        "contractor_name": document.contractor_name,
+        "amount": float(document.amount) if document.amount is not None else None,
+        "vat_amount": float(document.vat_amount) if document.vat_amount is not None else None,
+        "document_date": document.document_date.isoformat() if document.document_date else None,
+        "filename": document.filename,
+        "stored_path": document.stored_path,
+        "extracted_fields": document.extracted_fields,
+        "qdrant_ids": document.qdrant_ids,
+    }
+
+
+def _serialize_compliance_certificate(certificate: Any) -> dict[str, Any]:
+    return {
+        "id": certificate.id,
+        "property_id": certificate.property_id,
+        "certificate_type": certificate.certificate_type,
+        "issue_date": certificate.issue_date.isoformat() if certificate.issue_date else None,
+        "expiry_date": certificate.expiry_date.isoformat() if certificate.expiry_date else None,
+        "certificate_number": certificate.certificate_number,
+        "document_id": certificate.document_id,
+        "notes": certificate.notes,
+        "reminders_sent": certificate.reminders_sent,
+    }
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.post("/api/conveyancing", dependencies=[Depends(verify_internal_api_token)])
+def create_conveyancing_transaction(payload: ConveyancingCreateRequest) -> dict[str, Any]:
+    service = get_conveyancing_service()
+    transaction = service.create_transaction(payload.property_id, payload.transaction_type, stage=payload.stage, notes=payload.notes)
+    return _serialize_conveyancing_transaction(transaction)
+
+
+@router.get("/api/conveyancing", dependencies=[Depends(verify_internal_api_token)])
+def list_conveyancing_transactions(property_id: str | None = None, status: str | None = None) -> dict[str, Any]:
+    service = get_conveyancing_service()
+    transactions = service.list_transactions(property_id=property_id, status=status)
+    return {"items": [_serialize_conveyancing_transaction(item) for item in transactions], "count": len(transactions)}
+
+
+@router.get("/api/conveyancing/overdue", dependencies=[Depends(verify_internal_api_token)])
+def get_overdue_conveyancing_transactions() -> dict[str, Any]:
+    service = get_conveyancing_service()
+    return {"items": service.list_overdue()}
+
+
+@router.get("/api/conveyancing/{transaction_id}", dependencies=[Depends(verify_internal_api_token)])
+def get_conveyancing_transaction(transaction_id: str) -> dict[str, Any]:
+    service = get_conveyancing_service()
+    transaction = service.get_transaction(transaction_id)
+    if transaction is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+    return _serialize_conveyancing_transaction(transaction)
+
+
+@router.patch("/api/conveyancing/{transaction_id}", dependencies=[Depends(verify_internal_api_token)])
+def update_conveyancing_transaction(transaction_id: str, payload: ConveyancingUpdateRequest) -> dict[str, Any]:
+    service = get_conveyancing_service()
+    updates = {
+        field_name: getattr(payload, field_name)
+        for field_name in ["notes", "counterparty_solicitor_name", "counterparty_solicitor_email"]
+        if getattr(payload, field_name) is not None
+    }
+    transaction = service.update_transaction(transaction_id, updates)
+    if transaction is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+    if payload.stage is not None:
+        transaction = service.advance_stage(transaction_id, payload.stage)
+    return _serialize_conveyancing_transaction(transaction)
+
+
+@router.post("/api/conveyancing/{transaction_id}/documents", dependencies=[Depends(verify_internal_api_token)])
+async def upload_conveyancing_document(transaction_id: str, file: UploadFile, document_subtype: str | None = Form(default=None)) -> dict[str, Any]:
+    service = get_conveyancing_service()
+    temp_dir = Path(tempfile.gettempdir())
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"{uuid.uuid4().hex}_{file.filename or 'upload'}"
+    temp_path.write_bytes(await file.read())
+    try:
+        document = service.ingest_document(transaction_id, temp_path, filename=file.filename, document_subtype=document_subtype)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return _serialize_conveyancing_document(document)
+
+
+@router.get("/api/conveyancing/{transaction_id}/mortgage-offers/compare", dependencies=[Depends(verify_internal_api_token)])
+def compare_conveyancing_mortgage_offers(transaction_id: str) -> dict[str, Any]:
+    service = get_conveyancing_service()
+    return {"items": service.compare_mortgage_offers(transaction_id)}
+
+
+@router.post("/api/maintenance", dependencies=[Depends(verify_internal_api_token)])
+def create_maintenance_job(payload: MaintenanceCreateRequest) -> dict[str, Any]:
+    service = get_maintenance_service()
+    job = service.create_job(payload.property_id, payload.title, payload.description, urgency=payload.urgency, tenancy_id=payload.tenancy_id)
+    return _serialize_maintenance_job(job)
+
+
+@router.get("/api/maintenance", dependencies=[Depends(verify_internal_api_token)])
+def list_maintenance_jobs(property_id: str | None = None, stage: str | None = None) -> dict[str, Any]:
+    service = get_maintenance_service()
+    jobs = service.list_jobs(property_id=property_id, stage=stage)
+    return {"items": [_serialize_maintenance_job(job) for job in jobs], "count": len(jobs)}
+
+
+@router.get("/api/maintenance/spend", dependencies=[Depends(verify_internal_api_token)])
+def get_maintenance_spend(property_id: str | None = None, year: int | None = None) -> dict[str, Any]:
+    service = get_maintenance_service()
+    if property_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="property_id is required")
+    return service.spend(property_id, year=year)
+
+
+@router.get("/api/maintenance/{job_id}", dependencies=[Depends(verify_internal_api_token)])
+def get_maintenance_job(job_id: str) -> dict[str, Any]:
+    service = get_maintenance_service()
+    job = service.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return _serialize_maintenance_job(job)
+
+
+@router.patch("/api/maintenance/{job_id}", dependencies=[Depends(verify_internal_api_token)])
+def update_maintenance_job(job_id: str, payload: MaintenanceUpdateRequest) -> dict[str, Any]:
+    service = get_maintenance_service()
+    updates: dict[str, Any] = {}
+    for field_name in ["title", "description", "contractor_id"]:
+        value = getattr(payload, field_name, None)
+        if value is not None:
+            updates[field_name] = value
+    if payload.stage is not None:
+        job = service.advance_stage(job_id, payload.stage)
+    else:
+        job = service.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return _serialize_maintenance_job(job)
+
+
+@router.post("/api/maintenance/{job_id}/documents", dependencies=[Depends(verify_internal_api_token)])
+async def upload_maintenance_document(job_id: str, file: UploadFile, document_subtype: str | None = Form(default=None)) -> dict[str, Any]:
+    service = get_maintenance_service()
+    temp_dir = Path(tempfile.gettempdir())
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"{uuid.uuid4().hex}_{file.filename or 'upload'}"
+    temp_path.write_bytes(await file.read())
+    try:
+        document = service.ingest_document(job_id, temp_path, filename=file.filename, document_subtype=document_subtype)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return _serialize_maintenance_document(document)
+
+
+@router.get("/api/maintenance/{job_id}/documents/compare", dependencies=[Depends(verify_internal_api_token)])
+def compare_maintenance_documents(job_id: str) -> dict[str, Any]:
+    service = get_maintenance_service()
+    return {"items": service.compare_quotes(job_id)}
+
+
+@router.post("/api/compliance", dependencies=[Depends(verify_internal_api_token)])
+def create_compliance_certificate(payload: ComplianceCreateRequest) -> dict[str, Any]:
+    service = get_maintenance_service()
+    certificate = service.add_certificate(payload.property_id, payload.certificate_type, expiry_date=payload.expiry_date)
+    return _serialize_compliance_certificate(certificate)
+
+
+@router.get("/api/compliance", dependencies=[Depends(verify_internal_api_token)])
+def list_compliance_certificates(property_id: str | None = None) -> dict[str, Any]:
+    service = get_maintenance_service()
+    certificates = service.list_certificates(property_id=property_id)
+    return {"items": [_serialize_compliance_certificate(item) for item in certificates], "count": len(certificates)}
+
+
+@router.get("/api/compliance/overdue", dependencies=[Depends(verify_internal_api_token)])
+def get_overdue_compliance_certificates() -> dict[str, Any]:
+    service = get_maintenance_service()
+    return {"items": [_serialize_compliance_certificate(item) for item in service.overdue_certificates()]}
 
 
 @router.post("/api/tenancies", dependencies=[Depends(verify_internal_api_token)])
