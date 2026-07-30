@@ -107,6 +107,12 @@ class Tenant:
     notes: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    full_name: str | None = None
+    date_of_birth: date | None = None
+    national_insurance_number: str | None = None
+    passport_number: str | None = None
+    employer_name: str | None = None
+    annual_income: Decimal | None = None
 
     def months_until_lease_end(self) -> int:
         """Calculate months until lease ends."""

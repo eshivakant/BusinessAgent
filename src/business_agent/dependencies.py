@@ -13,9 +13,13 @@ from business_agent.memory.store import QdrantMemoryStore
 from business_agent.memory.text_memorization import TextMemorizationService
 from business_agent.orchestrator.conversation import ConversationStore, RedisConversationStore
 from business_agent.orchestrator.service import BusinessOrchestrator
+from business_agent.persistence.database import AppDatabase
+from business_agent.persistence.registry import SqlAlchemyDocumentRegistry, SqlAlchemyPropertyRegistry
 from business_agent.property.registry import InMemoryPropertyRegistry, PropertyRegistry
 from business_agent.telegram.client import TelegramBotClient
 from business_agent.telegram.ui_state import RedisTelegramUiStateStore, TelegramUiStateStore
+from business_agent.tenancy.registry import InMemoryTenancyRegistry, TenancyRegistry
+from business_agent.tenancy.service import TenancyService
 from business_agent.worker.queue import RedisSubagentQueue
 
 
@@ -52,13 +56,47 @@ def get_llm_client() -> LLMClient | None:
 
 @lru_cache
 def get_document_registry() -> DocumentRegistry:
+    app_database = get_app_database()
+    if app_database is not None:
+        return SqlAlchemyDocumentRegistry(app_database)
     return InMemoryDocumentRegistry()
 
 
 @lru_cache
 def get_property_registry() -> PropertyRegistry:
-    """Get property registry (in-memory for now, upgradeable to SQL)."""
+    app_database = get_app_database()
+    if app_database is not None:
+        return SqlAlchemyPropertyRegistry(app_database)
     return InMemoryPropertyRegistry()
+
+
+@lru_cache
+def get_tenancy_registry() -> TenancyRegistry:
+    app_database = get_app_database()
+    if app_database is not None:
+        from business_agent.persistence.registry import SqlAlchemyTenancyRegistry
+
+        return SqlAlchemyTenancyRegistry(app_database)
+    return InMemoryTenancyRegistry()
+
+
+@lru_cache
+def get_tenancy_service() -> TenancyService:
+    settings = get_settings()
+    return TenancyService(
+        tenancy_registry=get_tenancy_registry(),
+        property_registry=get_property_registry(),
+        memory_store=get_memory_store(),
+        summarizer=get_summarizer(),
+        chunk_size=settings.ingestion_chunk_size,
+        chunk_overlap=settings.ingestion_chunk_overlap,
+        max_document_chars=settings.ingestion_max_document_chars,
+        storage_dir=settings.tenant_docs_dir,
+        template_dir=settings.agreement_templates_dir,
+        generated_dir=settings.generated_agreements_dir,
+        llm_client=get_llm_client(),
+        allowed_local_dir=settings.ingestion_allowed_local_dir,
+    )
 
 
 @lru_cache
@@ -137,6 +175,7 @@ def get_orchestrator() -> BusinessOrchestrator:
         sql_reader=get_sql_reader(),
         document_registry=get_document_registry(),
         property_registry=get_property_registry(),
+        tenancy_service=get_tenancy_service(),
         llm_client=get_llm_client(),
         text_memorization_service=get_text_memorization_service(),
     )
@@ -151,3 +190,13 @@ def get_telegram_client() -> TelegramBotClient:
 @lru_cache
 def get_text_memorization_service() -> TextMemorizationService:
     return TextMemorizationService(memory_store=get_memory_store())
+
+
+@lru_cache
+def get_app_database() -> AppDatabase | None:
+    settings = get_settings()
+    if not settings.app_database_url:
+        return None
+    database = AppDatabase(settings.app_database_url)
+    database.ensure_schema()
+    return database

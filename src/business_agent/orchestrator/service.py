@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from textwrap import shorten
 from typing import Any
 
@@ -29,6 +31,7 @@ from business_agent.orchestrator.conversation import ConversationStore
 from business_agent.orchestrator.conversation_state import ConversationFlow, ConversationManager
 from business_agent.orchestrator.nl_query import QueryIntent, ParsedNLQuery, parse_natural_language_query
 from business_agent.property.registry import PropertyRegistry
+from business_agent.tenancy.service import TenancyService
 from business_agent.worker.contracts import DocumentIngestionTask, SubagentTaskQueue
 
 
@@ -42,6 +45,11 @@ HELP_TEXT = (
     "/property add\n"
     "/mortgage add <property_id>\n"
     "/mortgage expiring [months=<n>]\n"
+    "/tenant add <property_id>\n"
+    "/tenant list <property_id>\n"
+    "/tenant show <tenancy_id>\n"
+    "/tenant search <query> [tenancy_id=<id>]\n"
+    "/agreement generate <tenancy_id>\n"
     "/data table=<name> columns=<c1,c2> filters=<key:value,...> limit=<n>\n"
     "/reset\n\n"
     "📝 You can also send documents (PDF, DOCX, TXT) or photos for automatic ingestion.\n"
@@ -76,6 +84,7 @@ class BusinessOrchestrator:
         sql_reader: ReadOnlySQLDataAccess | None = None,
         document_registry: DocumentRegistry | None = None,
         property_registry: PropertyRegistry | None = None,
+        tenancy_service: TenancyService | None = None,
         llm_client: Any | None = None,
         text_memorization_service: Any | None = None,
     ) -> None:
@@ -86,6 +95,7 @@ class BusinessOrchestrator:
         self._sql_reader = sql_reader
         self._document_registry = document_registry
         self._property_registry = property_registry
+        self._tenancy_service = tenancy_service
         self._llm_client = llm_client
         self._text_memorization_service = text_memorization_service
         self._settings = get_settings()
@@ -127,6 +137,10 @@ class BusinessOrchestrator:
             return self._handle_property_command(chat_id, text)
         if text.startswith("/mortgage"):
             return self._handle_mortgage_command(chat_id, text)
+        if text.startswith("/tenant"):
+            return self._handle_tenant_command(chat_id, text)
+        if text.startswith("/agreement"):
+            return self._handle_agreement_command(chat_id, text)
         if text.startswith("/ingest"):
             return self._handle_ingest_command(text)
         if text.startswith("/data"):
@@ -445,6 +459,124 @@ class BusinessOrchestrator:
         
         return TelegramReply(text="Unknown mortgage command.")
 
+    def _handle_tenant_command(self, chat_id: int, text: str) -> TelegramReply:
+        if self._tenancy_service is None:
+            return TelegramReply(text="Tenancy service is not configured.")
+
+        command_text = text.strip()[7:].strip()
+        if not command_text:
+            return TelegramReply(
+                text=(
+                    "Usage: /tenant add <property_id> | /tenant list <property_id> | "
+                    "/tenant show <tenancy_id> | /tenant search <query> [tenancy_id=<id>]"
+                )
+            )
+
+        parts = shlex.split(command_text)
+        action = parts[0].lower() if parts else ""
+
+        if action == "add":
+            if len(parts) < 2:
+                return TelegramReply(text="Usage: /tenant add <property_id>")
+            property_id = parts[1]
+            user_id = str(chat_id)
+            self._conversation_manager.start_conversation(
+                user_id=user_id,
+                flow=ConversationFlow.TENANT_ADD,
+                initial_step="full_name",
+                initial_data={"property_id": property_id},
+            )
+            return TelegramReply(
+                text=(
+                    f"Let's add a tenant for property {property_id}. Please provide the full name.\n\n"
+                    "(Send /cancel to abort)"
+                )
+            )
+
+        if action == "list":
+            if len(parts) < 2:
+                return TelegramReply(text="Usage: /tenant list <property_id>")
+            tenancies = self._tenancy_service.list_tenancies(property_id=parts[1], active_only=True)
+            if not tenancies:
+                return TelegramReply(text=f"No active tenants found for property {parts[1]}.")
+            lines = [f"Active tenants for {parts[1]}:"]
+            for tenancy in tenancies:
+                lines.append(f"• {tenancy.full_name or tenancy.name} ({tenancy.id})")
+            return TelegramReply(text="\n".join(lines), show_actions=False)
+
+        if action == "show":
+            if len(parts) < 2:
+                return TelegramReply(text="Usage: /tenant show <tenancy_id>")
+            tenancy = self._tenancy_service.get_tenancy(parts[1])
+            if not tenancy:
+                return TelegramReply(text=f"Tenancy not found: {parts[1]}")
+            lines = [f"Tenant: {tenancy.full_name or tenancy.name}", f"Property ID: {tenancy.property_id}"]
+            if tenancy.email:
+                lines.append(f"Email: {tenancy.email}")
+            if tenancy.phone:
+                lines.append(f"Phone: {tenancy.phone}")
+            lines.append(f"Lease: {tenancy.lease_start} to {tenancy.lease_end}")
+            lines.append(f"Rent: £{tenancy.monthly_rent:,.2f}")
+            lines.append(f"Deposit: £{tenancy.deposit:,.2f}")
+            return TelegramReply(text="\n".join(lines), show_actions=False)
+
+        if action == "search":
+            if len(parts) < 2:
+                return TelegramReply(text="Usage: /tenant search <query> [tenancy_id=<id>]")
+            tenancy_id = None
+            query_parts: list[str] = []
+            for token in parts[1:]:
+                if token.startswith("tenancy_id="):
+                    tenancy_id = token.split("=", 1)[1]
+                else:
+                    query_parts.append(token)
+            query = " ".join(query_parts)
+            if not query:
+                return TelegramReply(text="Please provide a search query.")
+            matches = self._tenancy_service.search_documents(query=query, tenancy_id=tenancy_id)
+            if not matches:
+                return TelegramReply(text="No tenant documents found for that query.")
+            lines = [f"Found {len(matches)} result(s):"]
+            for match in matches:
+                lines.append(f"• {match.text[:120]} ({match.payload.tenancy_id})")
+            return TelegramReply(text="\n".join(lines), show_actions=False)
+
+        return TelegramReply(text="Unknown tenant command.")
+
+    def _handle_agreement_command(self, chat_id: int, text: str) -> TelegramReply:
+        if self._tenancy_service is None:
+            return TelegramReply(text="Tenancy service is not configured.")
+
+        command_text = text.strip()[10:].strip()
+        if not command_text:
+            return TelegramReply(text="Usage: /agreement generate <tenancy_id> [template_name]")
+
+        parts = shlex.split(command_text)
+        action = parts[0].lower() if parts else ""
+        if action != "generate":
+            return TelegramReply(text="Unknown agreement command.")
+        if len(parts) < 2:
+            return TelegramReply(text="Usage: /agreement generate <tenancy_id> [template_name]")
+
+        tenancy_id = parts[1]
+        template_name = parts[2] if len(parts) > 2 else None
+        try:
+            agreement, unresolved = self._tenancy_service.generate_agreement(
+                tenancy_id,
+                template_name=template_name,
+            )
+        except ValueError as exc:
+            return TelegramReply(text=str(exc))
+
+        unresolved_text = ", ".join(unresolved) if unresolved else "none"
+        return TelegramReply(
+            text=(
+                f"Agreement generated successfully.\n"
+                f"Path: {agreement.stored_path}\n"
+                f"Unresolved placeholders: {unresolved_text}"
+            )
+        )
+
     def _handle_data_command(self, text: str) -> TelegramReply:
         if self._sql_reader is None:
             return TelegramReply(
@@ -540,6 +672,12 @@ class BusinessOrchestrator:
             question_text=question_text,
             show_actions=True,
         )
+
+    def _parse_date(self, value: str) -> date:
+        parts = value.strip().split("-")
+        if len(parts) != 3:
+            raise ValueError("Expected YYYY-MM-DD")
+        return date(int(parts[0]), int(parts[1]), int(parts[2]))
 
     def _parse_optional_date(self, value: str | date | None) -> date | None:
         if value is None:
@@ -897,9 +1035,102 @@ class BusinessOrchestrator:
         self, user_id: str, text: str, conv: Any
     ) -> TelegramReply:
         """Handle multi-turn tenant add conversation."""
-        # TODO: Implement tenant add flow
-        self._conversation_manager.end_conversation(user_id)
-        return TelegramReply(text="Tenant add flow not yet implemented.")
+        if conv.step == "full_name":
+            if not text.strip():
+                return TelegramReply(text="Please provide the full name:")
+            conv.set_data("full_name", text.strip())
+            conv.update_step("email")
+            return TelegramReply(text="Email address? (or send 'skip')")
+
+        if conv.step == "email":
+            if text.lower() != "skip":
+                conv.set_data("email", text.strip())
+            conv.update_step("phone")
+            return TelegramReply(text="Phone number? (or send 'skip')")
+
+        if conv.step == "phone":
+            if text.lower() != "skip":
+                conv.set_data("phone", text.strip())
+            conv.update_step("lease_start")
+            return TelegramReply(text="Lease start date (YYYY-MM-DD)?")
+
+        if conv.step == "lease_start":
+            try:
+                conv.set_data("lease_start", self._parse_date(text))
+            except ValueError:
+                return TelegramReply(text="Please use YYYY-MM-DD format:")
+            conv.update_step("lease_end")
+            return TelegramReply(text="Lease end date (YYYY-MM-DD)?")
+
+        if conv.step == "lease_end":
+            try:
+                conv.set_data("lease_end", self._parse_date(text))
+            except ValueError:
+                return TelegramReply(text="Please use YYYY-MM-DD format:")
+            conv.update_step("monthly_rent")
+            return TelegramReply(text="Monthly rent (£)? (or send 'skip')")
+
+        if conv.step == "monthly_rent":
+            if text.lower() != "skip":
+                try:
+                    value = Decimal(text.replace("£", "").replace(",", "").strip())
+                    conv.set_data("monthly_rent", value)
+                except (ValueError, InvalidOperation):
+                    return TelegramReply(text="Please enter a valid rent amount:")
+            conv.update_step("deposit")
+            return TelegramReply(text="Deposit amount (£)? (or send 'skip')")
+
+        if conv.step == "deposit":
+            if text.lower() != "skip":
+                try:
+                    value = Decimal(text.replace("£", "").replace(",", "").strip())
+                    conv.set_data("deposit", value)
+                except (ValueError, InvalidOperation):
+                    return TelegramReply(text="Please enter a valid deposit amount:")
+            conv.update_step("notes")
+            return TelegramReply(text="Notes? (or send 'skip')")
+
+        if conv.step == "notes":
+            if text.lower() != "skip":
+                conv.set_data("notes", text.strip())
+            conv.update_step("confirm")
+            lines = ["Please confirm the tenancy details:"]
+            lines.append(f"Property ID: {conv.get_data('property_id')}")
+            lines.append(f"Full name: {conv.get_data('full_name')}")
+            if conv.get_data("email"):
+                lines.append(f"Email: {conv.get_data('email')}")
+            if conv.get_data("phone"):
+                lines.append(f"Phone: {conv.get_data('phone')}")
+            lines.append(f"Lease start: {conv.get_data('lease_start')}")
+            lines.append(f"Lease end: {conv.get_data('lease_end')}")
+            if conv.get_data("monthly_rent") is not None:
+                lines.append(f"Monthly rent: £{conv.get_data('monthly_rent'):,.2f}")
+            if conv.get_data("deposit") is not None:
+                lines.append(f"Deposit: £{conv.get_data('deposit'):,.2f}")
+            if conv.get_data("notes"):
+                lines.append(f"Notes: {conv.get_data('notes')}")
+            lines.append("\nSend 'yes' to save or 'no' to cancel.")
+            return TelegramReply(text="\n".join(lines))
+
+        if conv.step == "confirm":
+            if text.lower() in ["yes", "y", "confirm"]:
+                tenancy = self._tenancy_service.create_tenancy(
+                    property_id=conv.get_data("property_id"),
+                    full_name=conv.get_data("full_name"),
+                    email=conv.get_data("email"),
+                    phone=conv.get_data("phone"),
+                    lease_start=conv.get_data("lease_start"),
+                    lease_end=conv.get_data("lease_end"),
+                    monthly_rent=conv.get_data("monthly_rent"),
+                    deposit=conv.get_data("deposit"),
+                    notes=conv.get_data("notes"),
+                )
+                self._conversation_manager.end_conversation(user_id)
+                return TelegramReply(text=f"✅ Tenant added successfully! ID: {tenancy.id}")
+            self._conversation_manager.end_conversation(user_id)
+            return TelegramReply(text="Tenant registration cancelled.")
+
+        return TelegramReply(text="Unknown conversation step. Please start over with /tenant add")
 
     def memorize_text_message(self, chat_id: int, text: str) -> str | None:
         """Store a plain text message in memory. Returns record ID or None."""

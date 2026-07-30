@@ -18,9 +18,12 @@ dependencies = [
   "rq==2.4.1",
   "qdrant-client==1.14.3",
   "sqlalchemy==2.0.41",
+  "psycopg[binary]==3.2.9",
   "python-dateutil==2.9.0.post0",
   "pypdf==5.7.0",
   "python-docx==1.2.0",
+  "python-multipart==0.0.20",
+  "docxtpl==0.20.0",
 ]
 
 [project.optional-dependencies]
@@ -41,4 +44,8 @@ where = ["src"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
-
+markers = [
+  "unit: fast unit tests",
+  "e2e: fast end-to-end tests",
+  "e2e_stack: docker-compose-backed end-to-end tests",
+]

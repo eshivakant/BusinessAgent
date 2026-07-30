@@ -9,6 +9,7 @@ Production-ready scaffold for a Dockerized multi-agent business assistant with:
 - Read-only SQL data access layer (parameterized, SELECT-only, allowlisted tables)
 - Date-aware memory retrieval (`from` / `to` filtering)
 - Lightweight conversational continuity for Telegram (rolling summary + short recent-turn window)
+- Tenancy CRUD, tenant document ingestion, semantic tenant search, and agreement generation workflows
 
 ## Architecture
 
@@ -32,6 +33,15 @@ Each memory payload stores:
 
 Date filters are applied against `effective_date`.  
 This makes behavior explicit when source documents do not include a natural event date.
+
+### Application persistence
+
+Property and document registries can now use a dedicated application database via `APP_DATABASE_URL`.
+
+- **Purpose:** persist property, mortgage, tenant, maintenance, contact, and document metadata
+- **Recommended deployment:** a separate PostgreSQL database for BusinessAgent on the shared Docker network
+- **Fallback:** if `APP_DATABASE_URL` is unset, the scaffold falls back to in-memory registries
+- **Bootstrap:** run `docker compose --profile bootstrap up db-init` to create the database/schema when `APP_DATABASE_ADMIN_URL` is configured
 
 ### Document archival
 
@@ -95,6 +105,27 @@ src/business_agent/
 
 Services started: `app`, `worker`, `qdrant`, `redis`.
 
+### PostgreSQL persistence setup
+
+To persist properties and document metadata in PostgreSQL instead of memory:
+
+1. Set `APP_DATABASE_URL` to a dedicated BusinessAgent database on the shared Docker network.
+2. Optionally set `APP_DATABASE_ADMIN_URL` with admin credentials that can create the database and app role.
+3. Run the one-off bootstrap job:
+
+   ```powershell
+   docker compose --profile bootstrap up db-init
+   ```
+
+4. Start the app normally with `docker compose up --build`.
+
+Example:
+
+```env
+APP_DATABASE_URL=postgresql+psycopg://business_agent:change-me@postgres:5432/business_agent
+APP_DATABASE_ADMIN_URL=postgresql+psycopg://postgres:supersecret@postgres:5432/postgres
+```
+
 ## Telegram setup
 
 Set these values in `.env`:
@@ -135,6 +166,13 @@ Telegram commands:
 - `POST /api/memory/query`
 - `POST /api/documents/ingest`
 - `POST /api/sql/read`
+- `POST /api/tenancies`
+- `GET /api/tenancies`
+- `GET /api/tenancies/{tenancy_id}`
+- `PATCH /api/tenancies/{tenancy_id}`
+- `POST /api/tenancies/{tenancy_id}/documents`
+- `GET /api/tenancies/{tenancy_id}/documents`
+- `POST /api/agreements/generate`
 
 If `INTERNAL_API_TOKEN` is set, send `X-API-Token` for `/api/*` endpoints.
 
@@ -192,14 +230,39 @@ Important:
 - Keep copying `.env` manually to `${VPS_DEPLOY_PATH}/.env` as you planned.
 - Deployment fails early if `.env` is missing on the VPS.
 
+## End-to-end testing strategy
+
+BusinessAgent now ships with two test tiers:
+
+- Unit tests: fast, deterministic checks for modules and helpers.
+- Fast E2E tests: in-process FastAPI app plus deterministic fakes for Telegram, memory, queueing, SQL access, and property state. These are the default CI path.
+- Stack E2E: optional docker-compose-backed smoke coverage for postgres/redis/qdrant. Run it explicitly with `BUSINESS_AGENT_RUN_STACK_E2E=1`.
+
+Commands:
+
+```powershell
+python -m pip install -r requirements-dev.lock
+python -m pytest -q -m "not e2e_stack"
+```
+
+Optional stack run:
+
+```powershell
+$env:BUSINESS_AGENT_RUN_STACK_E2E = "1"
+python -m pytest -q -m "e2e_stack"
+```
+
 ## Local testing
 
 Install dependencies and run tests:
 
 ```powershell
-python -m pip install -r requirements-dev.lock
+python -m pip install -e .[dev]
 python -m pytest
+python -m pytest -m e2e
 ```
+
+Tenancy-specific coverage is included in `tests/test_tenancy_features.py` for unit and fast E2E flows.
 
 ## Configuration reference
 

@@ -1,6 +1,6 @@
 """Tests for property and mortgage command handlers in orchestrator."""
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import Mock
 
@@ -16,6 +16,10 @@ from business_agent.property.models import (
     Tenant,
 )
 from business_agent.property.registry import InMemoryPropertyRegistry
+
+
+def _months_ahead(days: int) -> date:
+    return date.today() + timedelta(days=days)
 
 
 class FakeMemoryStore:
@@ -80,7 +84,7 @@ def property_registry():
         term_months=240,
         start_date=date(2023, 1, 15),
         monthly_payment=Decimal("1500.00"),
-        end_date=date(2026, 10, 1),  # ~4 months from now (June 2026)
+        end_date=_months_ahead(120),
     )
     registry.add_mortgage(mort1)
     
@@ -184,11 +188,10 @@ class TestMortgageCommandHandlers:
         assert "123 Main St" in reply.text
         assert "Big Bank" in reply.text
         assert "4.5%" in reply.text
-        assert "2026-10-01" in reply.text
+        assert str(_months_ahead(120)) in reply.text
     
     def test_mortgage_expiring_custom_months(self, orchestrator):
         reply = orchestrator.handle_telegram_message_with_ui(chat_id=12345, message_text="/mortgage expiring months=3")
-        # Mortgage expires in ~4 months (June to October 2026), so won't show in 3-month window
         assert "No mortgages expiring within 3 months" in reply.text
     
     def test_mortgage_expiring_long_window(self, orchestrator):

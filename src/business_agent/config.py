@@ -50,8 +50,13 @@ class Settings(BaseSettings):
     ingestion_summary_sentences: int = 5
     ingestion_max_document_chars: int = 200000
     ingestion_enable_metadata_extraction: bool = True
+    tenant_docs_dir: str = "/data/tenant-docs"
+    agreement_templates_dir: str = "/data/agreement-templates"
+    generated_agreements_dir: str = "/data/generated-agreements"
     
     app_base_url: str | None = None
+    app_database_url: str | None = None
+    app_database_admin_url: str | None = None
 
     llm_openrouter_api_key: str | None = None
     llm_openrouter_base_url: str = "https://openrouter.ai/api/v1"

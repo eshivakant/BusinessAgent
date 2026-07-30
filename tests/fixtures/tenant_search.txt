@@ -1,0 +1,2 @@
+Tenant search fixture document for testing date filtering.
+This note mentions the tenant and lease details.

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import tempfile
+import uuid
 from datetime import date
+from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
 from business_agent.api.security import verify_internal_api_token
@@ -14,6 +18,7 @@ from business_agent.dependencies import (
     get_orchestrator,
     get_property_registry,
     get_sql_reader,
+    get_tenancy_service,
     get_telegram_client,
     get_telegram_ui_state,
 )
@@ -43,6 +48,39 @@ from business_agent.telegram.ui_state import TelegramUiPayload
 router = APIRouter()
 
 
+def _serialize_tenancy(tenancy: Any) -> dict[str, Any]:
+    return {
+        "id": tenancy.id,
+        "property_id": tenancy.property_id,
+        "full_name": tenancy.full_name or tenancy.name,
+        "email": tenancy.email,
+        "phone": tenancy.phone,
+        "lease_start": tenancy.lease_start.isoformat() if tenancy.lease_start else None,
+        "lease_end": tenancy.lease_end.isoformat() if tenancy.lease_end else None,
+        "monthly_rent": float(tenancy.monthly_rent) if tenancy.monthly_rent is not None else None,
+        "deposit": float(tenancy.deposit) if tenancy.deposit is not None else None,
+        "is_active": tenancy.is_active,
+        "notes": tenancy.notes,
+        "created_at": tenancy.created_at.isoformat() if tenancy.created_at else None,
+        "updated_at": tenancy.updated_at.isoformat() if tenancy.updated_at else None,
+    }
+
+
+def _serialize_document(document: Any) -> dict[str, Any]:
+    return {
+        "id": document.id,
+        "tenancy_id": document.tenancy_id,
+        "filename": document.filename,
+        "stored_path": document.stored_path,
+        "document_type": document.document_type,
+        "ingested_at": document.ingested_at.isoformat() if document.ingested_at else None,
+        "extracted_fields": document.extracted_fields,
+        "qdrant_ids": document.qdrant_ids,
+        "summary": document.summary,
+        "chunk_count": document.chunk_count,
+    }
+
+
 class MemoryQueryResponse(BaseModel):
     matches: list[MemoryMatch]
 
@@ -60,9 +98,158 @@ class DocumentIngestResponse(BaseModel):
     result: IngestionResult | None = None
 
 
+class TenancyCreateRequest(BaseModel):
+    property_id: str = Field(min_length=1)
+    full_name: str = Field(min_length=1)
+    email: str | None = None
+    phone: str | None = None
+    lease_start: date | None = None
+    lease_end: date | None = None
+    monthly_rent: float | None = None
+    deposit: float | None = None
+    notes: str | None = None
+
+
+class TenancyUpdateRequest(BaseModel):
+    full_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    lease_start: date | None = None
+    lease_end: date | None = None
+    monthly_rent: float | None = None
+    deposit: float | None = None
+    is_active: bool | None = None
+    notes: str | None = None
+
+
+class AgreementGenerateRequest(BaseModel):
+    tenancy_id: str = Field(min_length=1)
+    template_name: str | None = None
+    values: dict[str, Any] | None = None
+    missing_values: dict[str, Any] | None = None
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.post("/api/tenancies", dependencies=[Depends(verify_internal_api_token)])
+def create_tenancy(payload: TenancyCreateRequest) -> dict[str, Any]:
+    service = get_tenancy_service()
+    tenancy = service.create_tenancy(
+        property_id=payload.property_id,
+        full_name=payload.full_name,
+        email=payload.email,
+        phone=payload.phone,
+        lease_start=payload.lease_start,
+        lease_end=payload.lease_end,
+        monthly_rent=Decimal(str(payload.monthly_rent)) if payload.monthly_rent is not None else None,
+        deposit=Decimal(str(payload.deposit)) if payload.deposit is not None else None,
+        notes=payload.notes,
+    )
+    return _serialize_tenancy(tenancy)
+
+
+@router.get("/api/tenancies", dependencies=[Depends(verify_internal_api_token)])
+def list_tenancies(property_id: str | None = None, active_only: bool = True) -> dict[str, Any]:
+    service = get_tenancy_service()
+    tenancies = service.list_tenancies(property_id=property_id, active_only=active_only)
+    return {
+        "items": [_serialize_tenancy(tenancy) for tenancy in tenancies],
+        "count": len(tenancies),
+    }
+
+
+@router.get("/api/tenancies/{tenancy_id}", dependencies=[Depends(verify_internal_api_token)])
+def get_tenancy(tenancy_id: str) -> dict[str, Any]:
+    service = get_tenancy_service()
+    tenancy = service.get_tenancy(tenancy_id)
+    if tenancy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenancy not found")
+    return _serialize_tenancy(tenancy)
+
+
+@router.patch("/api/tenancies/{tenancy_id}", dependencies=[Depends(verify_internal_api_token)])
+def update_tenancy(tenancy_id: str, payload: TenancyUpdateRequest) -> dict[str, Any]:
+    service = get_tenancy_service()
+    updates: dict[str, Any] = {}
+    for field_name in [
+        "full_name",
+        "email",
+        "phone",
+        "lease_start",
+        "lease_end",
+        "monthly_rent",
+        "deposit",
+        "is_active",
+        "notes",
+    ]:
+        value = getattr(payload, field_name, None)
+        if value is not None:
+            if field_name in {"monthly_rent", "deposit"}:
+                updates[field_name] = Decimal(str(value))
+            else:
+                updates[field_name] = value
+    tenancy = service.update_tenancy(tenancy_id, updates)
+    if tenancy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenancy not found")
+    return _serialize_tenancy(tenancy)
+
+
+@router.post("/api/tenancies/{tenancy_id}/documents", dependencies=[Depends(verify_internal_api_token)])
+async def upload_tenancy_document(
+    tenancy_id: str,
+    file: UploadFile,
+    event_date: str | None = None,
+) -> dict[str, Any]:
+    service = get_tenancy_service()
+    temp_dir = Path(tempfile.gettempdir())
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"{uuid.uuid4().hex}_{file.filename or 'upload'}"
+    temp_path = temp_dir / safe_name
+    temp_path.write_bytes(await file.read())
+    try:
+        parsed_date = date.fromisoformat(event_date) if event_date else None
+        document = service.store_document(
+            tenancy_id,
+            temp_path,
+            filename=file.filename,
+            event_date=parsed_date,
+        )
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return _serialize_document(document)
+
+
+@router.get("/api/tenancies/{tenancy_id}/documents", dependencies=[Depends(verify_internal_api_token)])
+def list_tenancy_documents(tenancy_id: str) -> dict[str, Any]:
+    service = get_tenancy_service()
+    documents = service.list_documents(tenancy_id)
+    return {
+        "items": [_serialize_document(document) for document in documents],
+        "count": len(documents),
+    }
+
+
+@router.post("/api/agreements/generate", dependencies=[Depends(verify_internal_api_token)])
+def generate_agreement(payload: AgreementGenerateRequest) -> dict[str, Any]:
+    service = get_tenancy_service()
+    agreement, unresolved = service.generate_agreement(
+        payload.tenancy_id,
+        template_name=payload.template_name,
+        values=payload.values,
+        missing_values=payload.missing_values,
+    )
+    return {
+        "agreement_id": agreement.id,
+        "tenancy_id": agreement.tenancy_id,
+        "template_name": agreement.template_name,
+        "stored_path": agreement.stored_path,
+        "pdf_path": agreement.pdf_path,
+        "generated_at": agreement.generated_at.isoformat(),
+        "unresolved_placeholders": unresolved,
+    }
 
 
 @router.post("/telegram/webhook")

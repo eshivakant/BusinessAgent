@@ -1,6 +1,6 @@
 """Tests for property management API endpoints."""
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -17,6 +17,10 @@ from business_agent.property.models import (
     Tenant,
 )
 from business_agent.property.registry import InMemoryPropertyRegistry
+
+
+def _months_ahead(days: int) -> date:
+    return date.today() + timedelta(days=days)
 
 
 @pytest.fixture
@@ -67,7 +71,7 @@ def property_registry():
         term_months=240,
         start_date=date(2023, 1, 15),
         monthly_payment=Decimal("1500.00"),
-        end_date=date(2026, 10, 1),  # ~4 months from now
+        end_date=_months_ahead(120),
     )
     registry.add_mortgage(mort1)
     

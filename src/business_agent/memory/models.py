@@ -18,6 +18,8 @@ class MemoryPayload(BaseModel):
     summary: str | None = None
     property_address: str | None = None
     property_id: str | None = None
+    tenancy_id: str | None = None
+    document_id: str | None = None
     document_type: str | None = None
     amount: float | None = None
 

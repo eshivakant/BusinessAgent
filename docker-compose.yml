@@ -11,6 +11,8 @@ services:
     depends_on:
       redis:
         condition: service_started
+      postgres:
+        condition: service_started
       qdrant:
         condition: service_started
     volumes:
@@ -38,6 +40,8 @@ services:
     depends_on:
       redis:
         condition: service_started
+      postgres:
+        condition: service_started
       qdrant:
         condition: service_started
     volumes:
@@ -48,6 +52,19 @@ services:
       - app-network
     restart: unless-stopped
 
+  db-init:
+    build:
+      context: .
+    image: business-agent:latest
+    env_file:
+      - .env
+    command: python -m business_agent.persistence.bootstrap
+    profiles:
+      - bootstrap
+    networks:
+      - app-network
+    restart: "no"
+
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--appendonly", "yes"]
@@ -55,6 +72,20 @@ services:
       - redis_data:/data
     networks:
       - internal
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - internal
+      - app-network
     restart: unless-stopped
 
   qdrant:
@@ -69,6 +100,7 @@ services:
 
 volumes:
   redis_data:
+  postgres_data:
   qdrant_storage:
 
 networks:
